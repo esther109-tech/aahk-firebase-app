@@ -1,5 +1,13 @@
 {
   "projects": {
     "default": "gcp-tw-sandbox"
+  },
+  "targets": {},
+  "etags": {
+    "gcp-tw-sandbox": {
+      "extensionInstances": {
+        "firestore-send-email": "6e4301a143e8d6c2909279fc32921e0005b3994f321699f715e856ced027c981"
+      }
+    }
   }
 }
