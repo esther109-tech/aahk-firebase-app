@@ -92,12 +92,34 @@ export default function UploadForm() {
                     await addDoc(collection(db, "airline-upload"), {
                         file_name: file.name,
                         file_content: downloadURL,
-                        userEmail: auth.currentUser?.email || "anonymous-user@example.com",
+                        userEmail: auth.currentUser?.email || "esther.shih@microfusion.cloud",
                         recipientEmail: notifyEmail || "esther.shih@microfusion.cloud",
                         status: "Pending Review",
                         createdAt: serverTimestamp(),
                         fileType: file.type.startsWith("image/") ? "image" : "document"
                     });
+
+                    // 4. Trigger Email Notification via HTTPS Function
+                    try {
+                        const userToken = await auth.currentUser?.getIdToken();
+                        await fetch("https://asia-east1-gcp-tw-sandbox.cloudfunctions.net/onAirlineUpdateCreated", {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                                "Authorization": `Bearer ${userToken}`
+                            },
+                            body: JSON.stringify({
+                                file_name: file.name,
+                                fileType: file.type.startsWith("image/") ? "image" : "document",
+                                userEmail: auth.currentUser?.email || "esther.shih@microfusion.cloud",
+                                recipientEmail: notifyEmail || "esther.shih@microfusion.cloud",
+                                status: "Pending Review",
+                                file_content: downloadURL
+                            })
+                        });
+                    } catch (emailErr) {
+                        console.error("Email notification trigger failed:", emailErr);
+                    }
 
                     setStatus("success");
                     setUploading(false);

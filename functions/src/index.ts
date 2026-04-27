@@ -1,49 +1,68 @@
-import { onDocumentWritten } from "firebase-functions/v2/firestore";
+import { onRequest } from "firebase-functions/v2/https";
 import * as admin from "firebase-admin";
-import { getFirestore } from "firebase-admin/firestore";
 import * as logger from "firebase-functions/logger";
+import { defineSecret } from "firebase-functions/params";
+import { setSmtpCredentials } from "./helpers";
+import config from "./config";
 
 /**
- * v5.3 - Integrated Notification Workflow (SDK Standard Fix)
- * This function triggers on any WRITE to a document in the airline-upload collection.
- * Instead of sending emails directly, it creates a document in the 'mail' collection,
- * which is then processed by the Firebase Trigger Email Extension.
+ * v5.5 - Direct HTTPS Email Workflow (CORS enabled)
+ * This function is triggered via an HTTPS POST request.
+ * It sends emails directly via SMTP based on the request body.
  */
 
-// v5.3 REVERT: Initialize without databaseId (unsupported in AppOptions)
+const smtpPasswordSecret = defineSecret("firestore-send-email-SMTP_PASSWORD");
+
 admin.initializeApp();
 
-// Module-level diagnostic
-logger.info("SYSTEM: Airline Notification Function Module [v5.3] Initialized");
-
-export const onAirlineUpdateCreated = onDocumentWritten({
-    database: "(default)",
-    document: "airline-upload/{docId}",
+export const onAirlineUpdateCreated = onRequest({
     region: "asia-east1",
-}, async (event) => {
-    logger.info("TRIGGER: New document write detected", { docId: event.params.docId });
+    secrets: [smtpPasswordSecret],
+    cors: true, // Enable CORS for portal integration
+}, async (req, res) => {
+    if (req.method !== "POST") {
+        res.status(405).send("Method Not Allowed");
+        return;
+    }
 
-    const data = event.data?.after.data() || {};
-    logger.info("DATA: Document data", { data });
+    // 1. Verify Authorization Header
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        res.status(401).send("Unauthorized: Missing or invalid token");
+        return;
+    }
 
+    const idToken = authHeader.split("Bearer ")[1];
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        logger.info("AUTH: Token verified", { uid: decodedToken.uid });
+    } catch (authErr) {
+        logger.error("AUTH FAILURE: Invalid token", authErr);
+        res.status(401).send("Unauthorized: Invalid token");
+        return;
+    }
+
+    const data = req.body || {};
     const fileName = data.file_name;
     const userEmail = data.userEmail;
     const recipientEmail = data.recipientEmail || "esther.shih@microfusion.cloud";
 
-    logger.info("ACTION: Queueing email via Trigger Email extension", {
+    // Inject password from secret
+    config.smtpPassword = smtpPasswordSecret.value();
+
+    logger.info("ACTION: Sending email directly via SMTP", {
         to: recipientEmail,
         fileName
     });
 
     try {
-        // v5.3 FIX: Explicitly target the named database in every call
-        const db = getFirestore();
+        const transport = setSmtpCredentials(config);
 
-        await db.collection("mail").add({
+        await transport.sendMail({
+            from: config.defaultFrom,
             to: recipientEmail,
-            message: {
-                subject: `✈️ Airline Information Update: ${data.status || 'Notification'}`,
-                html: `
+            subject: `✈️ Airline Information Update: ${data.status || 'Notification'}`,
+            html: `
           <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
             <h2 style="color: #0f172a;">Aviation Portal Update</h2>
             <p style="color: #475569;">A new update has been logged via the SkyGate Portal.</p>
@@ -54,19 +73,25 @@ export const onAirlineUpdateCreated = onDocumentWritten({
               <p><strong>Submitted by:</strong> ${userEmail}</p>
               <p><strong>Status:</strong> <span style="color: #64748b;">${data.status || 'Pending Review'}</span></p>
             </div>
-    
-            <p style="color: #64748b; font-size: 14px;">Log ID: ${event.params.docId}</p>
+
+            <div style="margin-top: 25px; text-align: center;">
+              <a href="${data.file_content}" style="background-color: #0f172a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                View Uploaded Asset
+              </a>
+            </div>
+
+            <p style="color: #64748b; font-size: 12px; margin-top: 30px; border-top: 1px solid #f1f5f9; pt: 10px;">
+              Direct Link: <a href="${data.file_content}" style="color: #3b82f6;">${data.file_content}</a>
+            </p>
           </div>
         `,
-            },
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        logger.info("SUCCESS: Email document successfully added to queue.");
+        logger.info("SUCCESS: Email sent successfully.");
+        res.status(200).send({ status: "success", message: "Email sent" });
 
     } catch (error: any) {
-        logger.error("QUEUE FAILURE: Could not add document to mail collection", {
-            message: error.message
-        });
+        logger.error("SEND FAILURE", { message: error.message });
+        res.status(500).send({ status: "error", message: error.message });
     }
 });
