@@ -4,31 +4,27 @@ import { getFirestore } from "firebase-admin/firestore";
 import * as logger from "firebase-functions/logger";
 
 /**
- * v5.1 - Integrated Notification Workflow (FS SDK Fix)
+ * v5.3 - Integrated Notification Workflow (SDK Standard Fix)
  * This function triggers on any WRITE to a document in the airline-upload collection.
  * Instead of sending emails directly, it creates a document in the 'mail' collection,
  * which is then processed by the Firebase Trigger Email Extension.
  */
 
+// v5.3 REVERT: Initialize without databaseId (unsupported in AppOptions)
 admin.initializeApp();
 
 // Module-level diagnostic
-logger.info("SYSTEM: Airline Notification Function Module [v5.1] Initialized");
+logger.info("SYSTEM: Airline Notification Function Module [v5.3] Initialized");
 
 export const onAirlineUpdateCreated = onDocumentWritten({
-    database: "aahk-firestore",
+    database: "(default)",
     document: "airline-upload/{docId}",
+    region: "asia-east1",
 }, async (event) => {
     logger.info("TRIGGER: New document write detected", { docId: event.params.docId });
 
-    const change = event.data;
-    if (!change || !change.after.exists) {
-        logger.info("INFO: Document deleted. No notification required.");
-        return;
-    }
-
-    const data = change.after.data();
-    if (!data) return;
+    const data = event.data?.after.data() || {};
+    logger.info("DATA: Document data", { data });
 
     const fileName = data.file_name;
     const userEmail = data.userEmail;
@@ -40,8 +36,8 @@ export const onAirlineUpdateCreated = onDocumentWritten({
     });
 
     try {
-        // Correct way to get a named database in v12+
-        const db = getFirestore("aahk-firestore");
+        // v5.3 FIX: Explicitly target the named database in every call
+        const db = getFirestore();
 
         await db.collection("mail").add({
             to: recipientEmail,

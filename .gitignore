@@ -65,3 +65,6 @@ functions/node_modules/
 
 # Cloud
 .gcloud/
+
+# IAM Policy
+iam_policy.json
