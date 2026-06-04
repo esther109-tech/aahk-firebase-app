@@ -6,7 +6,7 @@
   "etags": {
     "gcp-tw-sandbox": {
       "extensionInstances": {
-        "firestore-send-email": "6e4301a143e8d6c2909279fc32921e0005b3994f321699f715e856ced027c981"
+        "firestore-send-email": "65a392708936fc0e5eff81f2a72583434490e0941967005b17d03bf79494c6c3"
       }
     }
   }

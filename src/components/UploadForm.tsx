@@ -4,8 +4,26 @@ import React, { useState, useEffect } from "react";
 import { storage, db, auth } from "@/lib/firebase";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
+import { getAirlineFromEmail } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
-import { Upload, FileCheck, Loader2, AlertCircle, CheckCircle2, Mail, FileText, Image as ImageIcon } from "lucide-react";
+import { loadGoogleScripts, requestGoogleAccessToken, openGooglePicker } from "@/lib/googleDrive";
+import { 
+    Upload, 
+    FileCheck, 
+    Loader2, 
+    AlertCircle, 
+    CheckCircle2, 
+    Mail, 
+    FileText, 
+    Image as ImageIcon,
+    HardDrive,
+    Settings,
+    X,
+    Key,
+    Database,
+    CloudLightning,
+    Check
+} from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
@@ -13,14 +31,45 @@ function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs));
 }
 
+const DEFAULT_API_KEY = "AIzaSyAaYbqcGRhVmDTkFre4AkpP_tYx-Ns7EP4";
+
 export default function UploadForm() {
+    const [uploadSource, setUploadSource] = useState<"local" | "drive">("local");
     const [file, setFile] = useState<File | null>(null);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [uploading, setUploading] = useState(false);
     const [progress, setProgress] = useState(0);
-    const [status, setStatus] = useState<"idle" | "uploading" | "success" | "error">("idle");
+    const [status, setStatus] = useState<"idle" | "uploading" | "success" | "error" | "downloading">("idle");
+    const [customStatusText, setCustomStatusText] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [notifyEmail, setNotifyEmail] = useState("");
+
+    // Google Drive Specific State
+    const [driveToken, setDriveToken] = useState<string | null>(null);
+    const [clientId, setClientId] = useState("");
+    const [apiKey, setApiKey] = useState(DEFAULT_API_KEY);
+    const [showSettings, setShowSettings] = useState(false);
+    const [isScriptsLoaded, setIsScriptsLoaded] = useState(false);
+    const [loadingScripts, setLoadingScripts] = useState(false);
+
+    // Load Client ID and API Key from localStorage or Env on mount
+    useEffect(() => {
+        if (typeof window !== "undefined") {
+            const savedClientId = localStorage.getItem("skygate_google_client_id");
+            if (savedClientId) {
+                setClientId(savedClientId);
+            } else {
+                setClientId(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "");
+            }
+
+            const savedApiKey = localStorage.getItem("skygate_google_api_key");
+            if (savedApiKey) {
+                setApiKey(savedApiKey);
+            } else {
+                setApiKey(process.env.NEXT_PUBLIC_GOOGLE_API_KEY || DEFAULT_API_KEY);
+            }
+        }
+    }, []);
 
     // Cleanup preview URL on unmount or file change
     useEffect(() => {
@@ -28,6 +77,17 @@ export default function UploadForm() {
             if (previewUrl) URL.revokeObjectURL(previewUrl);
         };
     }, [previewUrl]);
+
+    const handleSaveSettings = (newClientId: string, newApiKey: string) => {
+        setClientId(newClientId);
+        setApiKey(newApiKey);
+        if (typeof window !== "undefined") {
+            localStorage.setItem("skygate_google_client_id", newClientId);
+            localStorage.setItem("skygate_google_api_key", newApiKey);
+        }
+        setShowSettings(false);
+        setError(null);
+    };
 
     const validateAndSetFile = (selectedFile: File) => {
         const isDocx =
@@ -49,7 +109,7 @@ export default function UploadForm() {
                 setPreviewUrl(null);
             }
         } else {
-            setError("Unsupported format. Please upload .docx, .png, or .jpg.");
+            setError("Unsupported format. Please supply a .docx, .png, or .jpg file.");
             setFile(null);
             setPreviewUrl(null);
         }
@@ -58,6 +118,75 @@ export default function UploadForm() {
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const selectedFile = e.target.files?.[0];
         if (selectedFile) validateAndSetFile(selectedFile);
+    };
+
+    // Lazy load SDKs and authenticate Drive
+    const handleConnectDrive = async () => {
+        if (!clientId) {
+            setError("Please configure a valid Google Client ID first.");
+            setShowSettings(true);
+            return;
+        }
+
+        setLoadingScripts(true);
+        setError(null);
+        try {
+            await loadGoogleScripts();
+            setIsScriptsLoaded(true);
+            
+            const token = await requestGoogleAccessToken(clientId);
+            setDriveToken(token);
+        } catch (err: any) {
+            console.error("Google Drive connection error:", err);
+            setError(err.message || "Authentication with Google Drive failed.");
+        } finally {
+            setLoadingScripts(false);
+        }
+    };
+
+    const handleDisconnectDrive = () => {
+        setDriveToken(null);
+    };
+
+    // Launch Picker and fetch file
+    const handleBrowseDrive = () => {
+        if (!driveToken) return;
+
+        openGooglePicker({
+            apiKey: apiKey,
+            accessToken: driveToken,
+            onSelect: async ({ id, name, mimeType }) => {
+                setStatus("downloading");
+                setCustomStatusText(`Downloading "${name}" from Drive...`);
+                setError(null);
+
+                try {
+                    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`, {
+                        headers: {
+                            Authorization: `Bearer ${driveToken}`,
+                        },
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`Failed to download: ${response.statusText}`);
+                    }
+
+                    const blob = await response.blob();
+                    const driveFile = new File([blob], name, { type: mimeType });
+                    validateAndSetFile(driveFile);
+                    setStatus("idle");
+                    setCustomStatusText(null);
+                } catch (err: any) {
+                    console.error("Drive download error:", err);
+                    setError(`Failed to retrieve file from Google Drive: ${err.message || "Unknown error"}`);
+                    setStatus("error");
+                    setCustomStatusText(null);
+                }
+            },
+            onCancel: () => {
+                console.log("Picker cancelled.");
+            }
+        });
     };
 
     const handleUpload = async () => {
@@ -88,11 +217,15 @@ export default function UploadForm() {
                     // 2. Get Download URL
                     const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
 
+                    const userEmail = auth.currentUser?.email || "esther.shih@microfusion.cloud";
+                    const airlineName = getAirlineFromEmail(userEmail);
+
                     // 3. Create Firestore record
                     await addDoc(collection(db, "airline-upload"), {
                         file_name: file.name,
                         file_content: downloadURL,
-                        userEmail: auth.currentUser?.email || "esther.shih@microfusion.cloud",
+                        userEmail: userEmail,
+                        airlineName: airlineName,
                         recipientEmail: notifyEmail || "esther.shih@microfusion.cloud",
                         status: "Pending Review",
                         createdAt: serverTimestamp(),
@@ -130,7 +263,7 @@ export default function UploadForm() {
             );
         } catch (err) {
             console.error("Upload error:", err);
-            setError("An unexpected error occurred.");
+            setError("An unexpected error occurred during submit.");
             setStatus("error");
             setUploading(false);
         }
@@ -144,64 +277,247 @@ export default function UploadForm() {
                     <p className="text-slate-500 mt-1">Submit airline documents or fleet imagery</p>
                 </div>
 
-                <div
-                    className={cn(
-                        "relative group cursor-pointer border-2 border-dashed rounded-2xl overflow-hidden transition-all duration-300 min-h-[300px] flex items-center justify-center",
-                        status === "success" ? "border-emerald-500 bg-emerald-50" : "border-slate-300 hover:border-slate-400 bg-slate-50 hover:bg-slate-100/50"
-                    )}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => {
-                        e.preventDefault();
-                        const droppedFile = e.dataTransfer.files[0];
-                        if (droppedFile) validateAndSetFile(droppedFile);
-                    }}
-                >
-                    <input
-                        type="file"
-                        accept=".docx,.png,.jpg,.jpeg"
-                        onChange={handleFileChange}
-                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-not-allowed"
-                        disabled={uploading}
-                    />
+                {/* Source Selection Toggle */}
+                {!file && status !== "success" && (
+                    <div className="flex bg-slate-100 p-1.5 rounded-2xl border border-slate-200/50">
+                        <button
+                            onClick={() => { setUploadSource("local"); setError(null); }}
+                            className={cn(
+                                "flex-1 flex items-center justify-center space-x-2 py-3 px-4 rounded-xl text-sm font-bold transition-all duration-200",
+                                uploadSource === "local"
+                                    ? "bg-white text-slate-900 shadow-md shadow-slate-200/40"
+                                    : "text-slate-500 hover:text-slate-800"
+                            )}
+                        >
+                            <Upload className="w-4 h-4" />
+                            <span>Local File</span>
+                        </button>
+                        <button
+                            onClick={() => { setUploadSource("drive"); setError(null); }}
+                            className={cn(
+                                "flex-1 flex items-center justify-center space-x-2 py-3 px-4 rounded-xl text-sm font-bold transition-all duration-200",
+                                uploadSource === "drive"
+                                    ? "bg-white text-slate-900 shadow-md shadow-slate-200/40"
+                                    : "text-slate-500 hover:text-slate-800"
+                            )}
+                        >
+                            <HardDrive className="w-4 h-4" />
+                            <span>Google Drive</span>
+                        </button>
+                    </div>
+                )}
 
-                    <div className="flex flex-col items-center justify-center w-full h-full p-8 text-center space-y-4">
+                {/* Main Content Area */}
+                {file ? (
+                    /* Unified Selected File Card */
+                    <div className="p-6 rounded-2xl border-2 border-emerald-500 bg-emerald-50/20 text-center space-y-4 animate-in zoom-in-95 duration-300">
                         {previewUrl ? (
-                            <div className="relative w-48 h-48 rounded-2xl border-4 border-white shadow-lg overflow-hidden animate-in zoom-in-95 duration-500">
+                            <div className="relative w-48 h-48 rounded-xl border-4 border-white shadow-md overflow-hidden mx-auto">
                                 <img src={previewUrl} alt="Preview" className="w-full h-full object-cover" />
                                 <div className="absolute inset-0 bg-black/10 flex items-center justify-center">
-                                    <ImageIcon className="text-white w-8 h-8 drop-shadow-md" />
+                                    <ImageIcon className="text-white w-8 h-8 drop-shadow-sm" />
                                 </div>
                             </div>
                         ) : (
+                            <div className="w-16 h-16 bg-white border border-emerald-200 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-sm">
+                                <FileText className="w-8 h-8" />
+                            </div>
+                        )}
+                        <div className="space-y-1">
+                            <p className="text-sm text-slate-400 font-bold uppercase tracking-wider">Active Import</p>
+                            <p className="text-slate-900 font-extrabold text-lg truncate max-w-sm mx-auto">{file.name}</p>
+                        </div>
+                        <button
+                            onClick={() => { setFile(null); setPreviewUrl(null); }}
+                            className="text-rose-500 hover:text-rose-600 text-xs font-bold uppercase tracking-widest hover:underline transition-all flex items-center justify-center mx-auto space-x-1"
+                        >
+                            <X className="w-3.5 h-3.5" />
+                            <span>Remove Selection</span>
+                        </button>
+                    </div>
+                ) : status === "downloading" ? (
+                    /* Google Drive Loader */
+                    <div className="min-h-[300px] border border-slate-200 bg-slate-50/50 rounded-2xl flex flex-col items-center justify-center p-8 text-center space-y-4 animate-pulse">
+                        <div className="p-4 bg-white rounded-full shadow-md border border-slate-100">
+                            <Loader2 className="w-10 h-10 animate-spin text-slate-800" />
+                        </div>
+                        <p className="text-slate-800 font-bold text-lg">{customStatusText}</p>
+                        <p className="text-slate-400 text-xs uppercase tracking-widest font-semibold">Streaming to uploader buffer</p>
+                    </div>
+                ) : uploadSource === "local" ? (
+                    /* Local Dropzone */
+                    <div
+                        className={cn(
+                            "relative group cursor-pointer border-2 border-dashed rounded-2xl overflow-hidden transition-all duration-300 min-h-[300px] flex items-center justify-center",
+                            status === "success" ? "border-emerald-500 bg-emerald-50" : "border-slate-300 hover:border-slate-400 bg-slate-50 hover:bg-slate-100/50"
+                        )}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => {
+                            e.preventDefault();
+                            const droppedFile = e.dataTransfer.files[0];
+                            if (droppedFile) validateAndSetFile(droppedFile);
+                        }}
+                    >
+                        <input
+                            type="file"
+                            accept=".docx,.png,.jpg,.jpeg"
+                            onChange={handleFileChange}
+                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-not-allowed"
+                            disabled={uploading}
+                        />
+
+                        <div className="flex flex-col items-center justify-center w-full h-full p-8 text-center space-y-4">
                             <div className={cn(
-                                "p-6 rounded-full transition-colors duration-300",
-                                status === "success" ? "bg-emerald-100 text-emerald-600" : "bg-white text-slate-400 group-hover:text-slate-500 border border-slate-200"
+                                "p-6 rounded-full transition-colors duration-300 bg-white border border-slate-200 shadow-sm text-slate-400 group-hover:text-slate-500"
                             )}>
-                                {status === "uploading" ? (
-                                    <Loader2 className="w-10 h-10 animate-spin" />
-                                ) : status === "success" ? (
-                                    <CheckCircle2 className="w-10 h-10" />
-                                ) : file ? (
+                                <Upload className="w-10 h-10" />
+                            </div>
+
+                            <div className="space-y-1">
+                                <p className="text-slate-900 font-bold">Click or drag to supply asset</p>
+                                <p className="text-slate-400 text-xs mt-1 uppercase tracking-widest font-semibold">Docs or Images (.png, .jpg)</p>
+                            </div>
+                        </div>
+                    </div>
+                ) : (
+                    /* Google Drive Section */
+                    <div className="border border-slate-200 bg-slate-50/50 rounded-2xl p-8 text-center relative overflow-hidden min-h-[300px] flex flex-col justify-between">
+                        {!driveToken ? (
+                            /* Drive Log In */
+                            <div className="flex flex-col items-center justify-center space-y-5 my-auto">
+                                <div className="p-5 bg-white border border-slate-100 rounded-full shadow-md text-amber-500">
+                                    <Database className="w-10 h-10" />
+                                </div>
+                                <div className="space-y-1">
+                                    <h3 className="text-lg font-bold text-slate-900">Google Drive Integration</h3>
+                                    <p className="text-slate-500 text-xs max-w-sm mx-auto">Access files and assets securely from your cloud drive directory</p>
+                                </div>
+
+                                <button
+                                    onClick={handleConnectDrive}
+                                    disabled={loadingScripts}
+                                    className="px-6 py-3.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl font-bold transition-all shadow-md shadow-amber-500/15 flex items-center space-x-2 text-sm disabled:opacity-50"
+                                >
+                                    {loadingScripts ? (
+                                        <>
+                                            <Loader2 className="w-4 h-4 animate-spin" />
+                                            <span>Authenticating...</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <CloudLightning className="w-4 h-4" />
+                                            <span>Connect Google Drive</span>
+                                        </>
+                                    )}
+                                </button>
+                            </div>
+                        ) : (
+                            /* Drive Browsing Card */
+                            <div className="flex flex-col items-center justify-center space-y-5 my-auto">
+                                <div className="p-5 bg-emerald-500 text-white rounded-full shadow-md shadow-emerald-500/10">
                                     <FileCheck className="w-10 h-10" />
-                                ) : (
-                                    <Upload className="w-10 h-10" />
-                                )}
+                                </div>
+                                <div className="space-y-1">
+                                    <div className="flex items-center justify-center space-x-1.5">
+                                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                                        <h3 className="text-lg font-bold text-slate-900">Google Drive Connected</h3>
+                                    </div>
+                                    <p className="text-slate-500 text-xs">Browse documents and images using official Google Picker</p>
+                                </div>
+
+                                <div className="flex space-x-3">
+                                    <button
+                                        onClick={handleBrowseDrive}
+                                        className="px-6 py-3.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold transition-all shadow-md text-sm"
+                                    >
+                                        Browse Cloud Files
+                                    </button>
+                                    <button
+                                        onClick={handleDisconnectDrive}
+                                        className="px-4 py-3.5 border border-slate-200 hover:bg-slate-100 text-slate-600 rounded-xl font-semibold transition-all text-sm"
+                                    >
+                                        Disconnect
+                                    </button>
+                                </div>
                             </div>
                         )}
 
-                        <div className="space-y-1">
-                            {file ? (
-                                <p className="text-slate-900 font-bold tracking-tight truncate max-w-xs">{file.name}</p>
-                            ) : (
-                                <>
-                                    <p className="text-slate-900 font-bold">Click or drag to supply asset</p>
-                                    <p className="text-slate-400 text-xs mt-1 uppercase tracking-widest font-semibold">Docs or Images (.png, .jpg)</p>
-                                </>
-                            )}
+                        {/* Expandable Settings Gear */}
+                        <div className="mt-4 border-t border-slate-200/60 pt-4 flex flex-col items-center">
+                            <button
+                                onClick={() => setShowSettings(!showSettings)}
+                                className="text-slate-400 hover:text-slate-600 text-xs font-bold uppercase tracking-widest flex items-center space-x-1.5 transition-colors"
+                            >
+                                <Settings className="w-4 h-4" />
+                                <span>Settings & Credentials</span>
+                            </button>
+
+                            <AnimatePresence>
+                                {showSettings && (
+                                    <motion.div
+                                        initial={{ opacity: 0, height: 0 }}
+                                        animate={{ opacity: 1, height: "auto" }}
+                                        exit={{ opacity: 0, height: 0 }}
+                                        className="w-full text-left space-y-4 mt-4 bg-white p-5 rounded-xl border border-slate-200/80 shadow-inner"
+                                    >
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-xs font-bold text-slate-700 uppercase tracking-widest flex items-center space-x-1">
+                                                <Key className="w-3.5 h-3.5" />
+                                                <span>Google credentials</span>
+                                            </span>
+                                            <button onClick={() => setShowSettings(false)}>
+                                                <X className="w-3.5 h-3.5 text-slate-400 hover:text-slate-600" />
+                                            </button>
+                                        </div>
+                                        <p className="text-[10px] text-slate-400 leading-relaxed">
+                                            Enable the <strong>Google Picker API</strong> on GCP Console. To avoid restriction blocks, supply an unrestricted API developer Key and Client ID below.
+                                        </p>
+                                        
+                                        <div className="space-y-3">
+                                            {/* Client ID Field */}
+                                            <div className="space-y-1">
+                                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">OAuth Client ID</label>
+                                                <input
+                                                    type="text"
+                                                    defaultValue={clientId}
+                                                    id="client_id_input"
+                                                    placeholder="593899410363-xxx.apps.googleusercontent.com"
+                                                    className="w-full px-3 py-2 rounded-lg border border-slate-200 text-xs focus:ring-2 focus:ring-slate-900 focus:outline-none"
+                                                />
+                                            </div>
+
+                                            {/* API Key Field */}
+                                            <div className="space-y-1">
+                                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Developer API Key</label>
+                                                <input
+                                                    type="text"
+                                                    defaultValue={apiKey}
+                                                    id="api_key_input"
+                                                    placeholder="AIzaSy..."
+                                                    className="w-full px-3 py-2 rounded-lg border border-slate-200 text-xs focus:ring-2 focus:ring-slate-900 focus:outline-none"
+                                                />
+                                            </div>
+
+                                            <button
+                                                onClick={() => {
+                                                    const clientIdVal = (document.getElementById("client_id_input") as HTMLInputElement)?.value.trim() || "";
+                                                    const apiKeyVal = (document.getElementById("api_key_input") as HTMLInputElement)?.value.trim() || "";
+                                                    handleSaveSettings(clientIdVal, apiKeyVal);
+                                                }}
+                                                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold flex items-center justify-center space-x-1"
+                                            >
+                                                <Check className="w-3.5 h-3.5" />
+                                                <span>Save credentials</span>
+                                            </button>
+                                        </div>
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
                         </div>
                     </div>
-                </div>
+                )}
 
+                {/* Email Notification & Submit Logic */}
                 <AnimatePresence>
                     {file && status !== "success" && (
                         <motion.div

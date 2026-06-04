@@ -1,10 +1,43 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    
+    // Helper: Determine if user is an administrator
+    function isAdmin() {
+      return request.auth != null && (
+        request.auth.token.email.matches('.*@aahk\\.com$') ||
+        request.auth.token.email.matches('.*@microfusion\\.cloud$') ||
+        request.auth.token.email == 'esther.shih@microfusion.cloud'
+      );
+    }
+
+    // Helper: Determine if user belongs to the same airline as the document
+    function isSameAirline(resourceData) {
+      let email = request.auth.token.email;
+      let userAirline = email.matches('(?i).*cathay.*') ? 'Cathay Pacific' :
+                        email.matches('(?i).*singapore.*') ? 'Singapore Airlines' :
+                        email.matches('(?i).*emirates.*') ? 'Emirates' :
+                        email.matches('(?i).*(jal|japan).*') ? 'Japan Airlines' :
+                        email.matches('(?i).*qantas.*') ? 'Qantas' :
+                        email.matches('(?i).*airchina.*') ? 'Air China' :
+                        email.matches('(?i).*eva.*') ? 'EVA Air' :
+                        'Other';
+      
+      return (('userEmail' in resourceData) && resourceData.userEmail == email) || 
+             (('airlineName' in resourceData) && resourceData.airlineName == userAirline);
+    }
+
+    // Airline Upload (Submissions Log) Rules
     match /airline-upload/{document} {
-      allow read: if true; // In prod, restrict this
-      allow create: if request.auth != null;
-      allow update, delete: if false; // Only admins should update/delete
+      allow read: if isAdmin() || (request.auth != null && isSameAirline(resource.data));
+      allow create: if request.auth != null && request.resource.data.userEmail == request.auth.token.email;
+      allow update, delete: if isAdmin();
+    }
+
+    // Fleet Inventory Rules
+    match /fleet-inventory/{document} {
+      allow read: if isAdmin() || (request.auth != null && isSameAirline(resource.data));
+      allow write: if isAdmin(); // Cloud Functions running as Admin SDK bypass rules
     }
   }
 }
