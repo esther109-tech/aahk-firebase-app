@@ -10,6 +10,50 @@ import * as mammoth from "mammoth";
 
 const geminiApiKeySecret = defineSecret("GEMINI_API_KEY");
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+function isRetryableError(err: unknown): boolean {
+    const status = (err as any)?.status as number | undefined;
+    const message = String((err as any)?.message ?? "");
+    const causeCode = (err as any)?.cause?.code as string | undefined;
+
+    // Explicit retryable marker (e.g. empty Gemini response)
+    if ((err as any)?.retryable === true) return true;
+
+    // HTTP 429 (rate limit) and 5xx server errors
+    if (status === 429 || (status !== undefined && status >= 500 && status <= 504)) return true;
+
+    // Node.js network error codes
+    if (causeCode === "ECONNRESET" || causeCode === "ETIMEDOUT" || causeCode === "ENOTFOUND") return true;
+
+    // fetch() network failure
+    if (message.includes("fetch failed") || message.toLowerCase().includes("network")) return true;
+
+    return false;
+}
+
+async function retryWithBackoff<T>(
+    fn: () => Promise<T>,
+    maxRetries: number,
+    baseDelayMs: number
+): Promise<{ result: T; retryCount: number }> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            const result = await fn();
+            return { result, retryCount: attempt };
+        } catch (err) {
+            if (!isRetryableError(err)) throw err; // terminal — fail immediately
+            lastErr = err;
+            if (attempt < maxRetries) {
+                await sleep(baseDelayMs * Math.pow(2, attempt));
+            }
+        }
+    }
+    (lastErr as any).retryCount = maxRetries;
+    throw lastErr;
+}
+
 /**
  * v5.5 - Direct HTTPS Email Workflow (CORS enabled)
  * This function is triggered via an HTTPS POST request.
@@ -130,16 +174,27 @@ export const onAirlineUploadOCRTrigger = onDocumentCreated({
         return;
     }
 
+    let fetchRetries = 0;
+    let geminiRetries = 0;
+
     try {
-        // 1. Download file content from Storage (using direct fetch of the download URL)
+        // 1. Download file content from Storage (with retry on transient network errors)
         logger.info(`Downloading file from: ${fileContentUrl}`);
-        const response = await fetch(fileContentUrl);
-        if (!response.ok) {
-            throw new Error(`Failed to fetch file from URL: ${response.statusText}`);
-        }
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        logger.info(`Successfully downloaded file. Size: ${buffer.length} bytes.`);
+        const { result: buffer, retryCount: _fetchRetries } = await retryWithBackoff(
+            async () => {
+                const response = await fetch(fileContentUrl);
+                if (!response.ok) {
+                    throw Object.assign(
+                        new Error(`Failed to fetch file: ${response.status} ${response.statusText}`),
+                        { status: response.status }
+                    );
+                }
+                return Buffer.from(await response.arrayBuffer());
+            },
+            3, 1000
+        );
+        fetchRetries = _fetchRetries;
+        logger.info(`Successfully downloaded file. Size: ${buffer.length} bytes.${fetchRetries > 0 ? ` (after ${fetchRetries} retr${fetchRetries === 1 ? "y" : "ies"})` : ""}`);
 
         // 2. Set up Gemini client
         const ai = new GoogleGenAI({ apiKey: geminiApiKeySecret.value() });
@@ -212,26 +267,30 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
             ];
         }
 
-        // 4. Run Gemini model
+        // 4. Run Gemini model (with retry on rate limits, 5xx, empty responses)
         logger.info("Calling Gemini 2.5 Flash...");
-        const responseResult = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: contents,
-            config: {
-                systemInstruction: systemInstruction,
-                responseMimeType: "application/json",
-                responseSchema: responseSchema as any
-            }
-        });
-
-        const textResponse = responseResult.text;
-        logger.info(`Raw response from Gemini: ${textResponse}`);
-
-        if (!textResponse) {
-            throw new Error("Empty response returned from Gemini API");
-        }
-
-        const extractedData = JSON.parse(textResponse);
+        const { result: extractedData, retryCount: _geminiRetries } = await retryWithBackoff(
+            async () => {
+                const responseResult = await ai.models.generateContent({
+                    model: "gemini-2.5-flash",
+                    contents: contents,
+                    config: {
+                        systemInstruction: systemInstruction,
+                        responseMimeType: "application/json",
+                        responseSchema: responseSchema as any
+                    }
+                });
+                const textResponse = responseResult.text;
+                logger.info(`Raw response from Gemini: ${textResponse}`);
+                if (!textResponse) {
+                    throw Object.assign(new Error("Empty response from Gemini"), { retryable: true });
+                }
+                return JSON.parse(textResponse);
+            },
+            3, 1000
+        );
+        geminiRetries = _geminiRetries;
+        if (geminiRetries > 0) logger.info(`Gemini call succeeded after ${geminiRetries} retr${geminiRetries === 1 ? "y" : "ies"}.`);
 
         // 5. Save structured data back to Firestore
         const db = admin.firestore();
@@ -244,6 +303,7 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
 
         // Write ocr.completed audit event
         try {
+            const totalRetries = fetchRetries + geminiRetries;
             await db.collection("audit-log").add({
                 submissionId: docId,
                 airlineName: extractedData.airlineName || "Unknown",
@@ -254,6 +314,7 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
                     tailNumber: extractedData.tailNumber,
                     confidenceScore: extractedData.confidenceScore,
                     complianceStatus: extractedData.complianceStatus,
+                    ...(totalRetries > 0 && { retryCount: totalRetries }),
                 },
             });
         } catch (auditErr) {
@@ -291,12 +352,14 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
         logger.info(`SUCCESS: Background OCR processing complete for ${docId}`);
 
     } catch (err: any) {
-        logger.error(`FAILURE during OCR background processing for ${docId}`, err);
+        const totalRetries = fetchRetries + geminiRetries;
+        logger.error(`FAILURE during OCR background processing for ${docId} (retries: ${totalRetries})`, err);
         const db = admin.firestore();
         await db.collection("airline-upload").doc(docId).update({
             ai_extracted: true,
             status: "Processing Error",
-            error_log: err.message || "Unknown processing error"
+            error_log: err.message || "Unknown processing error",
+            retryCount: totalRetries,
         }).catch(writeErr => logger.error("Failed to write processing error to Firestore", writeErr));
 
         // Write ocr.failed audit event
@@ -307,7 +370,10 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
                 action: "ocr.failed",
                 actor: { uid: "system", email: "ocr@skygate.aero", displayName: "Gemini OCR" },
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                metadata: { errorMessage: String(err.message || "Unknown error").slice(0, 500) },
+                metadata: {
+                    errorMessage: String(err.message || "Unknown error").slice(0, 500),
+                    retryCount: totalRetries,
+                },
             });
         } catch (auditErr) {
             logger.error("Failed to write ocr.failed audit event", auditErr);
