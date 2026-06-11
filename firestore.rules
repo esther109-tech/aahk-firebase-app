@@ -32,12 +32,26 @@ service cloud.firestore {
       allow read: if isAdmin() || (request.auth != null && isSameAirline(resource.data));
       allow create: if request.auth != null && request.resource.data.userEmail == request.auth.token.email;
       allow update, delete: if isAdmin();
+
+      // Comments subcollection
+      match /comments/{comment} {
+        allow read: if isAdmin() || (request.auth != null && isSameAirline(get(/databases/$(database)/documents/airline-upload/$(document)).data));
+        allow create: if request.auth != null && request.resource.data.authorEmail == request.auth.token.email;
+        allow update, delete: if isAdmin() || (request.auth != null && resource.data.authorEmail == request.auth.token.email);
+      }
     }
 
     // Fleet Inventory Rules
     match /fleet-inventory/{document} {
       allow read: if isAdmin() || (request.auth != null && isSameAirline(resource.data));
       allow write: if isAdmin(); // Cloud Functions running as Admin SDK bypass rules
+    }
+
+    // Audit Log Rules — write-once, admin-read only
+    match /audit-log/{eventId} {
+      allow create: if request.auth != null;
+      allow read:   if isAdmin();
+      allow update, delete: if false;
     }
   }
 }

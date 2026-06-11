@@ -1,0 +1,117 @@
+name: Deploy to Firebase
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Required for Workload Identity Federation
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: gcp-tw-sandbox
+  # Replace with the service account you bound to the WIF pool.
+  # To check: gcloud iam service-accounts list --project=gcp-tw-sandbox
+  # The SA needs roles: firebase.admin (or granular: cloudfunctions.developer,
+  # firebaserules.admin, firebasestorage.admin) + iam.serviceAccountUser
+  SERVICE_ACCOUNT: github-actions-sa@gcp-tw-sandbox.iam.gserviceaccount.com
+  WIF_PROVIDER: projects/593899410363/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+
+jobs:
+  # ── Lint & build ───────────────────────────────────────────────────────────
+  # Runs on every push and PR. Catches TypeScript / lint errors before deploy.
+  lint-and-build:
+    name: Lint & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build (Next.js)
+        run: npm run build
+
+      - name: Install function dependencies
+        run: npm ci
+        working-directory: functions
+
+  # ── Deploy ─────────────────────────────────────────────────────────────────
+  # Runs only on push to main. Deploys Firestore rules/indexes, Storage rules,
+  # Cloud Functions, and the firestore-send-email extension config.
+  # Firebase App Hosting (aahk-airline-firestore) is deployed automatically
+  # via the Firebase GitHub App on every push — no CLI step needed here.
+  deploy:
+    name: Deploy Firebase
+    runs-on: ubuntu-latest
+    needs: lint-and-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install function dependencies
+        run: npm ci
+        working-directory: functions
+
+      - name: Authenticate to Google Cloud (WIF)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy Firestore rules & indexes
+        run: |
+          firebase deploy \
+            --only firestore \
+            --project "$PROJECT_ID" \
+            --non-interactive
+
+      - name: Deploy Storage rules
+        run: |
+          firebase deploy \
+            --only storage \
+            --project "$PROJECT_ID" \
+            --non-interactive
+
+      - name: Deploy Cloud Functions
+        run: |
+          firebase deploy \
+            --only functions \
+            --project "$PROJECT_ID" \
+            --non-interactive
+
+      - name: Deploy Extensions
+        run: |
+          firebase deploy \
+            --only extensions \
+            --project "$PROJECT_ID" \
+            --non-interactive

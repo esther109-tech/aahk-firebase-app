@@ -242,6 +242,24 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
             status: extractedData.complianceStatus === "Passed" ? "Approved" : "Action Required"
         });
 
+        // Write ocr.completed audit event
+        try {
+            await db.collection("audit-log").add({
+                submissionId: docId,
+                airlineName: extractedData.airlineName || "Unknown",
+                action: "ocr.completed",
+                actor: { uid: "system", email: "ocr@skygate.aero", displayName: "Gemini OCR" },
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                metadata: {
+                    tailNumber: extractedData.tailNumber,
+                    confidenceScore: extractedData.confidenceScore,
+                    complianceStatus: extractedData.complianceStatus,
+                },
+            });
+        } catch (auditErr) {
+            logger.error("Failed to write ocr.completed audit event", auditErr);
+        }
+
         // 6. Upsert into fleet-inventory
         const tailNumber = extractedData.tailNumber ? extractedData.tailNumber.trim() : "";
         if (tailNumber && tailNumber.toLowerCase() !== "unknown" && tailNumber !== "") {
@@ -280,6 +298,20 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
             status: "Processing Error",
             error_log: err.message || "Unknown processing error"
         }).catch(writeErr => logger.error("Failed to write processing error to Firestore", writeErr));
+
+        // Write ocr.failed audit event
+        try {
+            await db.collection("audit-log").add({
+                submissionId: docId,
+                airlineName: "Unknown",
+                action: "ocr.failed",
+                actor: { uid: "system", email: "ocr@skygate.aero", displayName: "Gemini OCR" },
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                metadata: { errorMessage: String(err.message || "Unknown error").slice(0, 500) },
+            });
+        } catch (auditErr) {
+            logger.error("Failed to write ocr.failed audit event", auditErr);
+        }
     }
 });
 

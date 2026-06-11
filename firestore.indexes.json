@@ -49,6 +49,14 @@
         { "fieldPath": "lastComplianceStatus", "order": "ASCENDING" },
         { "fieldPath": "tailNumber", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "audit-log",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "submissionId", "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

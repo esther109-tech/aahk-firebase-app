@@ -4,6 +4,7 @@ import React, { useState, useEffect } from "react";
 import { storage, db, auth } from "@/lib/firebase";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
+import { writeAuditEvent } from "@/lib/audit";
 import { getAirlineFromEmail } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 import { loadGoogleScripts, requestGoogleAccessToken, openGooglePicker } from "@/lib/googleDrive";
@@ -221,7 +222,8 @@ export default function UploadForm() {
                     const airlineName = getAirlineFromEmail(userEmail);
 
                     // 3. Create Firestore record
-                    await addDoc(collection(db, "airline-upload"), {
+                    const fileType = file.type.startsWith("image/") ? "image" : "document";
+                    const docRef = await addDoc(collection(db, "airline-upload"), {
                         file_name: file.name,
                         file_content: downloadURL,
                         userEmail: userEmail,
@@ -229,8 +231,24 @@ export default function UploadForm() {
                         recipientEmail: notifyEmail || "esther.shih@microfusion.cloud",
                         status: "Pending Review",
                         createdAt: serverTimestamp(),
-                        fileType: file.type.startsWith("image/") ? "image" : "document"
+                        fileType,
                     });
+
+                    // Write audit event for submission creation
+                    const currentUser = auth.currentUser;
+                    if (currentUser) {
+                        await writeAuditEvent({
+                            submissionId: docRef.id,
+                            airlineName: airlineName,
+                            action: "submission.created",
+                            actor: {
+                                uid: currentUser.uid,
+                                email: currentUser.email!,
+                                displayName: currentUser.displayName || currentUser.email!,
+                            },
+                            metadata: { fileName: file.name, fileType },
+                        });
+                    }
 
                     // 4. Trigger Email Notification via HTTPS Function
                     try {
@@ -243,7 +261,7 @@ export default function UploadForm() {
                             },
                             body: JSON.stringify({
                                 file_name: file.name,
-                                fileType: file.type.startsWith("image/") ? "image" : "document",
+                                fileType,
                                 userEmail: auth.currentUser?.email || "esther.shih@microfusion.cloud",
                                 recipientEmail: notifyEmail || "esther.shih@microfusion.cloud",
                                 status: "Pending Review",

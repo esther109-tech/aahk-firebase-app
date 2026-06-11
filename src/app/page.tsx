@@ -5,6 +5,8 @@ import UploadForm from "@/components/UploadForm";
 import LoginForm from "@/components/LoginForm";
 import SubmissionsTable from "@/components/SubmissionsTable";
 import FleetTable from "@/components/FleetTable";
+import AuditTrail from "@/components/AuditTrail";
+import { writeAuditEvent } from "@/lib/audit";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { collection, query, where, onSnapshot, doc, getDoc, updateDoc, setDoc, addDoc, serverTimestamp, orderBy, getDocs, limit, Timestamp } from "firebase/firestore";
@@ -52,7 +54,7 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<"submissions" | "fleet">("submissions");
 
   // Live Review Board State
-  const [drawerTab, setDrawerTab] = useState<"details" | "comments">("details");
+  const [drawerTab, setDrawerTab] = useState<"details" | "comments" | "audit">("details");
   const [comments, setComments] = useState<any[]>([]);
   const [commentInput, setCommentInput] = useState("");
   const [postingComment, setPostingComment] = useState(false);
@@ -160,6 +162,13 @@ export default function Home() {
         authorName: user.displayName || user.email.split("@")[0],
         createdAt: serverTimestamp(),
       });
+      await writeAuditEvent({
+        submissionId: selectedSubmission.id,
+        airlineName: selectedSubmission.airlineName || "",
+        action: "submission.comment_added",
+        actor: { uid: user.uid, email: user.email, displayName: user.displayName || user.email },
+        metadata: { commentPreview: commentInput.trim().slice(0, 80) },
+      });
       setCommentInput("");
     } catch (error) {
       console.error("Failed to post comment:", error);
@@ -175,6 +184,13 @@ export default function Home() {
     try {
       const docRef = doc(db, "airline-upload", selectedSubmission.id);
       await updateDoc(docRef, { status: newStatus });
+      await writeAuditEvent({
+        submissionId: selectedSubmission.id,
+        airlineName: selectedSubmission.airlineName || "",
+        action: "submission.status_changed",
+        actor: { uid: user!.uid, email: user!.email!, displayName: user!.displayName || user!.email! },
+        metadata: { from: selectedSubmission.status, to: newStatus },
+      });
       setSelectedSubmission((prev: any) => prev ? { ...prev, status: newStatus } : prev);
       setStatusDropdownOpen(false);
     } catch (error) {
@@ -742,6 +758,19 @@ export default function Home() {
                       </span>
                     )}
                   </button>
+                  {isAdmin && (
+                    <button
+                      onClick={() => setDrawerTab("audit")}
+                      className={`flex items-center space-x-1.5 px-4 py-2.5 text-xs font-bold border-b-2 transition-colors ${
+                        drawerTab === "audit"
+                          ? "border-slate-900 text-slate-900"
+                          : "border-transparent text-slate-400 hover:text-slate-600"
+                      }`}
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>Audit Trail</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -987,6 +1016,16 @@ export default function Home() {
                       </button>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* Audit Trail tab */}
+              {drawerTab === "audit" && isAdmin && selectedSubmission && (
+                <div className="p-6 overflow-y-auto flex-1">
+                  <AuditTrail
+                    submissionId={selectedSubmission.id}
+                    submission={selectedSubmission}
+                  />
                 </div>
               )}
 

@@ -1,0 +1,181 @@
+export interface AuditEventRecord {
+  id: string;
+  action: string;
+  actor: { email: string; displayName: string };
+  timestamp: { seconds: number } | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface SubmissionSummary {
+  id: string;
+  file_name: string;
+  airlineName: string;
+  status: string;
+  extractedData?: { tailNumber?: string };
+}
+
+function formatMetadata(action: string, metadata: Record<string, unknown>): string {
+  switch (action) {
+    case "submission.status_changed":
+      return `${metadata.from} → ${metadata.to}`;
+    case "submission.comment_added":
+      return `"${metadata.commentPreview}"`;
+    case "ocr.completed":
+      return `Tail: ${metadata.tailNumber} · Confidence: ${metadata.confidenceScore}% · ${metadata.complianceStatus}`;
+    case "ocr.failed":
+      return `Error: ${metadata.errorMessage}`;
+    case "submission.created":
+      return `${metadata.fileName} (${metadata.fileType})`;
+    default:
+      return JSON.stringify(metadata);
+  }
+}
+
+function formatTimestamp(ts: { seconds: number } | null): string {
+  if (!ts) return "—";
+  return new Date(ts.seconds * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+}
+
+function triggerDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function filenameDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+export function exportAuditCSV(
+  submission: SubmissionSummary,
+  events: AuditEventRecord[]
+): void {
+  const tailNumber = submission.extractedData?.tailNumber || submission.id;
+  const header = ["Timestamp", "Action", "Actor", "Details"];
+  const rows = events.map((e) => [
+    formatTimestamp(e.timestamp),
+    e.action,
+    e.actor.email,
+    formatMetadata(e.action, e.metadata).replace(/"/g, '""'),
+  ]);
+
+  const csv = [header, ...rows]
+    .map((row) => row.map((cell) => `"${cell}"`).join(","))
+    .join("\n");
+
+  triggerDownload(
+    new Blob([csv], { type: "text/csv;charset=utf-8;" }),
+    `audit-${tailNumber}-${filenameDate()}.csv`
+  );
+}
+
+export async function exportAuditPDF(
+  submission: SubmissionSummary,
+  events: AuditEventRecord[]
+): Promise<void> {
+  const { default: jsPDF } = await import("jspdf");
+
+  const tailNumber = submission.extractedData?.tailNumber || submission.id;
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+
+  const marginL = 20;
+  const marginR = 20;
+  const pageW = 210;
+  const contentW = pageW - marginL - marginR;
+  let y = 20;
+
+  // Title
+  doc.setFontSize(16);
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(15, 23, 42); // slate-950
+  doc.text("Compliance Audit Report", marginL, y);
+  y += 8;
+
+  // Header metadata
+  doc.setFontSize(9);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(100, 116, 139); // slate-500
+  const meta = [
+    `Submission ID: ${submission.id}`,
+    `Tail #: ${tailNumber}`,
+    `Airline: ${submission.airlineName}`,
+    `File: ${submission.file_name}`,
+    `Status: ${submission.status}`,
+    `Exported: ${new Date().toUTCString()}`,
+  ];
+  meta.forEach((line) => {
+    doc.text(line, marginL, y);
+    y += 5;
+  });
+  y += 3;
+
+  // Divider
+  doc.setDrawColor(226, 232, 240); // slate-200
+  doc.line(marginL, y, pageW - marginR, y);
+  y += 6;
+
+  // Table header
+  doc.setFontSize(8);
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(148, 163, 184); // slate-400
+  doc.setFillColor(248, 250, 252); // slate-50
+  doc.rect(marginL, y - 4, contentW, 6, "F");
+  doc.text("TIMESTAMP", marginL + 1, y);
+  doc.text("ACTION", marginL + 42, y);
+  doc.text("ACTOR", marginL + 85, y);
+  doc.text("DETAILS", marginL + 125, y);
+  y += 4;
+
+  doc.setDrawColor(226, 232, 240);
+  doc.line(marginL, y, pageW - marginR, y);
+  y += 4;
+
+  // Event rows
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+
+  events.forEach((e, i) => {
+    const rowH = 8;
+    if (y + rowH > 280) {
+      doc.addPage();
+      y = 20;
+    }
+
+    if (i % 2 === 0) {
+      doc.setFillColor(248, 250, 252);
+      doc.rect(marginL, y - 3, contentW, rowH, "F");
+    }
+
+    doc.setTextColor(51, 65, 85); // slate-700
+    const ts = formatTimestamp(e.timestamp).slice(0, 19);
+    doc.text(ts, marginL + 1, y);
+
+    const actionShort = e.action.replace("submission.", "").replace("ocr.", "ocr:");
+    doc.text(actionShort, marginL + 42, y);
+
+    const actorShort = e.actor.email.split("@")[0];
+    doc.text(actorShort, marginL + 85, y);
+
+    const details = formatMetadata(e.action, e.metadata);
+    const detailLines = doc.splitTextToSize(details, contentW - 126);
+    doc.text(detailLines[0], marginL + 125, y);
+
+    y += rowH;
+  });
+
+  y += 6;
+
+  // Footer
+  doc.setFontSize(7);
+  doc.setTextColor(148, 163, 184);
+  doc.text(
+    `Generated by SkyGate Portal — ${new Date().toUTCString()}`,
+    marginL,
+    285
+  );
+
+  doc.save(`audit-${tailNumber}-${filenameDate()}.pdf`);
+}
