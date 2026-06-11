@@ -19,8 +19,8 @@ const storage = getStorage(app);
 const db = getFirestore(app);
 const auth = getAuth(app);
 
-// Connect to emulators in development mode
-if (process.env.NODE_ENV === "development") {
+// Connect to emulators only when NEXT_PUBLIC_USE_EMULATORS=true
+if (process.env.NEXT_PUBLIC_USE_EMULATORS === "true") {
   const g = globalThis as any;
   if (!g._firebaseEmulatorsConnected) {
     try {
