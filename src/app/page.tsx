@@ -9,7 +9,7 @@ import AuditTrail from "@/components/AuditTrail";
 import { writeAuditEvent } from "@/lib/audit";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
-import { collection, query, where, onSnapshot, doc, getDoc, updateDoc, setDoc, addDoc, serverTimestamp, orderBy, getDocs, limit, Timestamp } from "firebase/firestore";
+import { collection, query, where, onSnapshot, doc, getDoc, updateDoc, setDoc, addDoc, deleteDoc, serverTimestamp, orderBy, getDocs, limit, Timestamp } from "firebase/firestore";
 import { motion, AnimatePresence } from "framer-motion";
 import { isUserAdmin, getAirlineFromEmail } from "@/lib/utils";
 import { 
@@ -40,7 +40,8 @@ import {
   MessageSquare,
   Send,
   ChevronDown,
-  User2
+  User2,
+  Trash2
 } from "lucide-react";
 
 export default function Home() {
@@ -175,6 +176,12 @@ export default function Home() {
     } finally {
       setPostingComment(false);
     }
+  };
+
+  const handleDeleteComment = async (commentId: string) => {
+    if (!selectedSubmission?.id) return;
+    const commentRef = doc(db, "airline-upload", selectedSubmission.id, "comments", commentId);
+    await deleteDoc(commentRef).catch((err) => console.error("Failed to delete comment:", err));
   };
 
   // Admin: Update submission status
@@ -964,14 +971,25 @@ export default function Home() {
                                 )}
                               </div>
                               {/* Bubble */}
-                              <div
-                                className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
-                                  isOwnComment
-                                    ? "bg-slate-900 text-white rounded-br-md"
-                                    : "bg-slate-100 text-slate-800 border border-slate-200 rounded-bl-md"
-                                }`}
-                              >
-                                {comment.text}
+                              <div className="group relative">
+                                <div
+                                  className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
+                                    isOwnComment
+                                      ? "bg-slate-900 text-white rounded-br-md"
+                                      : "bg-slate-100 text-slate-800 border border-slate-200 rounded-bl-md"
+                                  }`}
+                                >
+                                  {comment.text}
+                                </div>
+                                {(isAdmin || isOwnComment) && (
+                                  <button
+                                    onClick={() => handleDeleteComment(comment.id)}
+                                    className={`absolute top-1 ${isOwnComment ? "-left-7" : "-right-7"} opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-full bg-white border border-slate-200 text-slate-400 hover:text-rose-500 hover:border-rose-200`}
+                                    title="Delete comment"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                )}
                               </div>
                               {/* Timestamp */}
                               <p className={`text-[10px] text-slate-400 ${isOwnComment ? "text-right" : "text-left"}`}>
