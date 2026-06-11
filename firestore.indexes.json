@@ -1,4 +1,55 @@
 {
-    "indexes": [],
-    "fieldOverrides": []
+  "indexes": [
+    {
+      "collectionGroup": "airline-upload",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "airlineName", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "airline-upload",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "airline-upload",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "airlineName", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "fleet-inventory",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "airlineName", "order": "ASCENDING" },
+        { "fieldPath": "tailNumber", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "fleet-inventory",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "lastComplianceStatus", "order": "ASCENDING" },
+        { "fieldPath": "tailNumber", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "fleet-inventory",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "airlineName", "order": "ASCENDING" },
+        { "fieldPath": "lastComplianceStatus", "order": "ASCENDING" },
+        { "fieldPath": "tailNumber", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
 }

@@ -57,6 +57,17 @@ export function getAirlineFromEmail(email: string | null | undefined): string {
     return "Other";
 }
 
+export const AIRLINE_OPTIONS = [
+  "Cathay Pacific",
+  "Singapore Airlines",
+  "Emirates",
+  "Japan Airlines",
+  "Qantas",
+  "Air China",
+  "EVA Air",
+  "All Nippon Airways",
+];
+
 /**
  * Determines whether a user email has administrative access.
  */

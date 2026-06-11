@@ -3,9 +3,11 @@
 import React, { useState, useEffect } from "react";
 import UploadForm from "@/components/UploadForm";
 import LoginForm from "@/components/LoginForm";
+import SubmissionsTable from "@/components/SubmissionsTable";
+import FleetTable from "@/components/FleetTable";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, User } from "firebase/auth";
-import { collection, query, where, onSnapshot } from "firebase/firestore";
+import { collection, query, where, onSnapshot, doc, getDoc, updateDoc, setDoc, addDoc, serverTimestamp, orderBy, getDocs, limit, Timestamp } from "firebase/firestore";
 import { motion, AnimatePresence } from "framer-motion";
 import { isUserAdmin, getAirlineFromEmail } from "@/lib/utils";
 import { 
@@ -32,7 +34,11 @@ import {
   TrendingUp,
   Wrench,
   ShieldAlert,
-  ArrowRight
+  ArrowRight,
+  MessageSquare,
+  Send,
+  ChevronDown,
+  User2
 } from "lucide-react";
 
 export default function Home() {
@@ -40,11 +46,18 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
   const [tenantName, setTenantName] = useState("");
-  const [submissions, setSubmissions] = useState<any[]>([]);
   const [fleet, setFleet] = useState<any[]>([]);
   const [selectedSubmission, setSelectedSubmission] = useState<any | null>(null);
   const [showDrawer, setShowDrawer] = useState(false);
   const [activeTab, setActiveTab] = useState<"submissions" | "fleet">("submissions");
+
+  // Live Review Board State
+  const [drawerTab, setDrawerTab] = useState<"details" | "comments">("details");
+  const [comments, setComments] = useState<any[]>([]);
+  const [commentInput, setCommentInput] = useState("");
+  const [postingComment, setPostingComment] = useState(false);
+  const [updatingStatus, setUpdatingStatus] = useState(false);
+  const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
 
   // Auth State Listener
   useEffect(() => {
@@ -61,47 +74,6 @@ export default function Home() {
     });
     return () => unsubscribe();
   }, []);
-
-  // Fetch Submissions in Real-time (Partitioned by Tenant)
-  useEffect(() => {
-    if (!user) {
-      setSubmissions([]);
-      return;
-    }
-
-    let q;
-    if (isUserAdmin(user.email)) {
-      // Admins see all submissions
-      q = collection(db, "airline-upload");
-    } else {
-      // Airline staff see only their own airline's submissions
-      const userAirline = getAirlineFromEmail(user.email);
-      q = query(
-        collection(db, "airline-upload"),
-        where("airlineName", "==", userAirline)
-      );
-    }
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const docs = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-
-      // Sort DESC by createdAt client-side
-      docs.sort((a: any, b: any) => {
-        const timeA = a.createdAt?.seconds || 0;
-        const timeB = b.createdAt?.seconds || 0;
-        return timeB - timeA;
-      });
-
-      setSubmissions(docs);
-    }, (error) => {
-      console.error("Firestore submissions subscription error:", error);
-    });
-
-    return () => unsubscribe();
-  }, [user]);
 
   // Fetch Fleet Inventory in Real-time (Partitioned by Tenant)
   useEffect(() => {
@@ -147,79 +119,122 @@ export default function Home() {
   const handleOpenDrawer = (submission: any) => {
     setSelectedSubmission(submission);
     setShowDrawer(true);
+    setDrawerTab("details");
+    setComments([]);
+    setCommentInput("");
+    setStatusDropdownOpen(false);
   };
 
-  // Open the compliance report for an aircraft by finding its linked submission
-  const handleOpenReportFromAircraft = (aircraft: any) => {
-    // Attempt 1: Search by lastReportId
-    let matchingSub = submissions.find(sub => sub.id === aircraft.lastReportId);
-    
-    // Attempt 2: Fallback search by tailNumber inside extractedData
-    if (!matchingSub) {
-      matchingSub = submissions.find(sub => sub.extractedData?.tailNumber === aircraft.tailNumber);
+  // Real-time comments subscription
+  useEffect(() => {
+    if (!showDrawer || !selectedSubmission?.id) {
+      setComments([]);
+      return;
     }
 
-    if (matchingSub) {
-      handleOpenDrawer(matchingSub);
-    } else {
-      // Create a dynamic report representation if submission is not available
-      const mockSub = {
-        id: aircraft.lastReportId || `AUTO-${aircraft.tailNumber}`,
-        file_name: `Automated Log for ${aircraft.tailNumber}`,
-        file_content: "#",
-        userEmail: "system@skygate.aero",
-        fileType: "document",
-        ai_extracted: true,
-        status: aircraft.lastComplianceStatus === "Passed" ? "Approved" : "Action Required",
-        extractedData: {
-          airlineName: aircraft.airlineName,
-          aircraftModel: aircraft.aircraftModel,
-          tailNumber: aircraft.tailNumber,
-          updateDate: aircraft.lastUpdate ? new Date(aircraft.lastUpdate.seconds * 1000).toLocaleDateString() : "Just Now",
-          complianceStatus: aircraft.lastComplianceStatus,
-          complianceReason: `Fleet Registry entry for ${aircraft.tailNumber} in active state of ${aircraft.status}. Last compliance sync succeeded.`,
-          confidenceScore: 100,
-          summary: `This is an auto-generated audit profile representing the synced fleet state for aircraft ${aircraft.tailNumber}.`
+    const commentsRef = collection(db, "airline-upload", selectedSubmission.id, "comments");
+    const commentsQuery = query(commentsRef, orderBy("createdAt", "asc"));
+
+    const unsubscribe = onSnapshot(commentsQuery, (snapshot) => {
+      const docs = snapshot.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+      }));
+      setComments(docs);
+    }, (error) => {
+      console.error("Comments subscription error:", error);
+    });
+
+    return () => unsubscribe();
+  }, [showDrawer, selectedSubmission?.id]);
+
+  // Post a new comment
+  const handlePostComment = async () => {
+    if (!commentInput.trim() || !selectedSubmission?.id || !user?.email) return;
+    setPostingComment(true);
+    try {
+      const commentsRef = collection(db, "airline-upload", selectedSubmission.id, "comments");
+      await addDoc(commentsRef, {
+        text: commentInput.trim(),
+        authorEmail: user.email,
+        authorName: user.displayName || user.email.split("@")[0],
+        createdAt: serverTimestamp(),
+      });
+      setCommentInput("");
+    } catch (error) {
+      console.error("Failed to post comment:", error);
+    } finally {
+      setPostingComment(false);
+    }
+  };
+
+  // Admin: Update submission status
+  const handleStatusChange = async (newStatus: string) => {
+    if (!selectedSubmission?.id || !isAdmin) return;
+    setUpdatingStatus(true);
+    try {
+      const docRef = doc(db, "airline-upload", selectedSubmission.id);
+      await updateDoc(docRef, { status: newStatus });
+      setSelectedSubmission((prev: any) => prev ? { ...prev, status: newStatus } : prev);
+      setStatusDropdownOpen(false);
+    } catch (error) {
+      console.error("Failed to update status:", error);
+    } finally {
+      setUpdatingStatus(false);
+    }
+  };
+
+  // Open the compliance report for an aircraft — looks up the linked submission from Firestore
+  const handleOpenReportFromAircraft = async (aircraft: any) => {
+    // Attempt 1: direct lookup by lastReportId
+    if (aircraft.lastReportId) {
+      try {
+        const snap = await getDoc(doc(db, "airline-upload", aircraft.lastReportId));
+        if (snap.exists()) {
+          handleOpenDrawer({ id: snap.id, ...snap.data() });
+          return;
         }
-      };
-      handleOpenDrawer(mockSub);
+      } catch {}
     }
-  };
 
-  const getStatusBadge = (submission: any) => {
-    if (!submission.ai_extracted) {
-      return (
-        <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-blue-50 border border-blue-200 text-blue-600 text-xs font-semibold animate-pulse">
-          <Loader2 className="w-3 h-3 animate-spin" />
-          <span>Processing Audit...</span>
-        </span>
+    // Attempt 2: query by tailNumber
+    try {
+      const tailQ = query(
+        collection(db, "airline-upload"),
+        where("extractedData.tailNumber", "==", aircraft.tailNumber),
+        orderBy("createdAt", "desc"),
+        limit(1)
       );
-    }
+      const tailSnap = await getDocs(tailQ);
+      if (!tailSnap.empty) {
+        const d = tailSnap.docs[0];
+        handleOpenDrawer({ id: d.id, ...d.data() });
+        return;
+      }
+    } catch {}
 
-    if (submission.status === "Approved") {
-      return (
-        <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold">
-          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-          <span>Approved</span>
-        </span>
-      );
-    }
-
-    if (submission.status === "Action Required") {
-      return (
-        <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold animate-[pulse_3s_infinite]">
-          <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
-          <span>Action Required</span>
-        </span>
-      );
-    }
-
-    return (
-      <span className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-slate-50 border border-slate-200 text-slate-600 text-xs font-semibold">
-        <Clock className="w-3.5 h-3.5 text-slate-400" />
-        <span>{submission.status || "Pending"}</span>
-      </span>
-    );
+    // Fallback: synthetic report from fleet record
+    handleOpenDrawer({
+      id: aircraft.lastReportId || `AUTO-${aircraft.tailNumber}`,
+      file_name: `Automated Log for ${aircraft.tailNumber}`,
+      file_content: "#",
+      userEmail: "system@skygate.aero",
+      fileType: "document",
+      ai_extracted: true,
+      status: aircraft.lastComplianceStatus === "Passed" ? "Approved" : "Action Required",
+      extractedData: {
+        airlineName: aircraft.airlineName,
+        aircraftModel: aircraft.aircraftModel,
+        tailNumber: aircraft.tailNumber,
+        updateDate: aircraft.lastUpdate
+          ? new Date(aircraft.lastUpdate.seconds * 1000).toLocaleDateString()
+          : "Just Now",
+        complianceStatus: aircraft.lastComplianceStatus,
+        complianceReason: `Fleet Registry entry for ${aircraft.tailNumber} in active state of ${aircraft.status}. Last compliance sync succeeded.`,
+        confidenceScore: 100,
+        summary: `Auto-generated audit profile for aircraft ${aircraft.tailNumber}.`,
+      },
+    });
   };
 
   // Dynamic Dashboard Stats
@@ -585,196 +600,19 @@ export default function Home() {
               <div className="lg:col-span-8 bg-white rounded-2xl border border-slate-200 shadow-xl shadow-slate-200/40 p-6 space-y-6 min-h-[480px]">
                 
                 {activeTab === "submissions" ? (
-                  /* TAB 1: SUBMISSIONS LOG VIEW */
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-4">
-                      <div className="flex items-center space-x-2">
-                        <Sparkles className="w-5 h-5 text-indigo-500 animate-pulse" />
-                        <h3 className="text-lg font-bold text-slate-900">Compliance Audits Registry</h3>
-                      </div>
-                      <span className="text-xs font-bold text-slate-400 uppercase tracking-wider bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">
-                        {submissions.length} total reports
-                      </span>
-                    </div>
-
-                    {submissions.length === 0 ? (
-                      <div className="py-24 text-center space-y-3">
-                        <div className="inline-flex p-4 rounded-full bg-slate-50 border border-slate-100 text-slate-400">
-                          <FileText className="w-8 h-8" />
-                        </div>
-                        <p className="text-slate-500 font-semibold">No compliance audits found.</p>
-                        <p className="text-slate-400 text-xs max-w-sm mx-auto leading-relaxed">
-                          Your uploaded PDF/DOCX safety forms and aircraft maintenance logs will be parsed by Gemini and visible here.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-left border-collapse">
-                          <thead>
-                            <tr className="border-b border-slate-100 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                              <th className="pb-3 pl-2">Document Details</th>
-                              {isAdmin && <th className="pb-3">Airline</th>}
-                              <th className="pb-3">Tail Number</th>
-                              <th className="pb-3">Audit State</th>
-                              <th className="pb-3 text-right">Action</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-50 text-sm">
-                            {submissions.map((sub) => (
-                              <tr key={sub.id} className="hover:bg-slate-50/40 transition-colors group">
-                                <td className="py-3.5 pl-2 max-w-[180px]">
-                                  <div className="flex items-center space-x-3">
-                                    <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 text-slate-500 group-hover:bg-white group-hover:shadow-sm transition-all flex-shrink-0">
-                                      {sub.fileType === "image" ? (
-                                        <ImageIcon className="w-4 h-4 text-indigo-500" />
-                                      ) : (
-                                        <FileText className="w-4 h-4 text-emerald-500" />
-                                      )}
-                                    </div>
-                                    <div className="truncate min-w-0">
-                                      <p className="font-semibold text-slate-900 truncate">{sub.file_name}</p>
-                                      <p className="text-[10px] text-slate-400 flex items-center mt-0.5 font-medium">
-                                        <Clock className="w-3 h-3 mr-1" />
-                                        {sub.createdAt
-                                          ? new Date(sub.createdAt.seconds * 1000).toLocaleDateString(undefined, {
-                                              month: "short",
-                                              day: "numeric",
-                                              hour: "2-digit",
-                                              minute: "2-digit"
-                                            })
-                                          : "Just now"}
-                                      </p>
-                                    </div>
-                                  </div>
-                                </td>
-                                {isAdmin && (
-                                  <td className="py-3.5 align-middle font-bold text-slate-700 text-xs">
-                                    {sub.airlineName || "Global"}
-                                  </td>
-                                )}
-                                <td className="py-3.5 align-middle">
-                                  <span className="font-mono text-xs font-bold text-slate-900 bg-slate-50 border border-slate-100 px-2 py-0.5 rounded-md">
-                                    {sub.extractedData?.tailNumber || sub.tailNumber || "Pending"}
-                                  </span>
-                                </td>
-                                <td className="py-3.5 align-middle">
-                                  {getStatusBadge(sub)}
-                                </td>
-                                <td className="py-3.5 text-right align-middle pr-1">
-                                  <button
-                                    onClick={() => handleOpenDrawer(sub)}
-                                    className="inline-flex items-center space-x-1.5 text-xs font-bold text-slate-700 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 px-3 py-2 rounded-xl border border-slate-150 hover:border-indigo-100 transition-all shadow-xs"
-                                  >
-                                    <Eye className="w-3.5 h-3.5" />
-                                    <span>Audit Report</span>
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
+                  <SubmissionsTable
+                    user={user}
+                    isAdmin={isAdmin}
+                    tenantName={tenantName}
+                    onSelectSubmission={handleOpenDrawer}
+                  />
                 ) : (
-                  /* TAB 2: FLEET INVENTORY GRID REGISTRY VIEW */
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between border-b border-slate-100 pb-4">
-                      <div className="flex items-center space-x-2">
-                        <Plane className="w-5 h-5 text-indigo-500" />
-                        <h3 className="text-lg font-bold text-slate-900">Active Fleet Directory</h3>
-                      </div>
-                      <span className="text-xs font-bold text-slate-400 uppercase tracking-wider bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-100">
-                        {fleet.length} registered assets
-                      </span>
-                    </div>
-
-                    {fleet.length === 0 ? (
-                      <div className="py-24 text-center space-y-3">
-                        <div className="inline-flex p-4 rounded-full bg-slate-50 border border-slate-100 text-slate-400">
-                          <Plane className="w-8 h-8 -rotate-45" />
-                        </div>
-                        <p className="text-slate-500 font-semibold">No fleet aircraft registered.</p>
-                        <p className="text-slate-400 text-xs max-w-sm mx-auto leading-relaxed">
-                          Enrolled airline assets will appear here automatically once safety checks are successfully scanned and verified.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {fleet.map((aircraft) => {
-                          const isPassed = aircraft.lastComplianceStatus === "Passed";
-                          const isAlert = aircraft.lastComplianceStatus === "Action Required";
-                          
-                          return (
-                            <div 
-                              key={aircraft.id} 
-                              className="bg-slate-50 border border-slate-200/60 p-5 rounded-2xl flex flex-col justify-between hover:border-slate-300 hover:shadow-md transition-all group duration-300 relative overflow-hidden"
-                            >
-                              {/* Background color block for status feedback */}
-                              <div className={`absolute top-0 right-0 w-24 h-24 rounded-full filter blur-xl opacity-[0.03] ${
-                                isPassed ? "bg-emerald-500" : isAlert ? "bg-rose-500" : "bg-indigo-500"
-                              }`} />
-
-                              <div className="space-y-3">
-                                {/* Row 1: Tail Number & Operational State Badge */}
-                                <div className="flex items-center justify-between">
-                                  <span className="font-mono text-md font-extrabold text-slate-900 bg-white border border-slate-200 shadow-xs px-2.5 py-1 rounded-xl">
-                                    {aircraft.tailNumber}
-                                  </span>
-                                  {aircraft.status === "Active" ? (
-                                    <span className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold">
-                                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-                                      <span>Active</span>
-                                    </span>
-                                  ) : aircraft.status === "In Maintenance" ? (
-                                    <span className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold animate-pulse">
-                                      <Wrench className="w-3.5 h-3.5 text-rose-500" />
-                                      <span>Maintenance</span>
-                                    </span>
-                                  ) : (
-                                    <span className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-slate-100 border border-slate-200 text-slate-600 text-xs font-semibold">
-                                      <Clock className="w-3.5 h-3.5 text-slate-400" />
-                                      <span>{aircraft.status || "Unknown"}</span>
-                                    </span>
-                                  )}
-                                </div>
-
-                                {/* Row 2: Aircraft Specifications */}
-                                <div className="space-y-1">
-                                  <p className="text-xs font-extrabold text-slate-800">{aircraft.aircraftModel}</p>
-                                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider flex items-center">
-                                    <Layers className="w-3 h-3 mr-1 text-slate-300" />
-                                    {aircraft.airlineName}
-                                  </p>
-                                </div>
-                              </div>
-
-                              {/* Row 3: Bottom action section */}
-                              <div className="border-t border-slate-200/60 pt-4 mt-4 flex items-center justify-between">
-                                <div className="text-[10px] text-slate-400">
-                                  <p className="font-medium">Last Audited</p>
-                                  <p className="font-bold text-slate-600 mt-0.5">
-                                    {aircraft.lastUpdate 
-                                      ? new Date(aircraft.lastUpdate.seconds * 1000).toLocaleDateString()
-                                      : "Recently"}
-                                  </p>
-                                </div>
-
-                                <button
-                                  onClick={() => handleOpenReportFromAircraft(aircraft)}
-                                  className="inline-flex items-center space-x-1 text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-white hover:bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl shadow-xs hover:shadow transition-all"
-                                >
-                                  <span>View Report</span>
-                                  <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
-                                </button>
-                              </div>
-
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
+                  <FleetTable
+                    user={user}
+                    isAdmin={isAdmin}
+                    tenantName={tenantName}
+                    onSelectAircraft={handleOpenReportFromAircraft}
+                  />
                 )}
 
               </div>
@@ -806,179 +644,363 @@ export default function Home() {
               className="fixed right-0 top-0 h-full w-full max-w-lg bg-white/95 backdrop-blur-xl shadow-2xl z-50 border-l border-slate-200 overflow-y-auto flex flex-col"
             >
               {/* Header */}
-              <div className="p-6 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white/90 backdrop-blur-md z-10">
-                <div className="flex items-center space-x-2.5">
-                  <div className="p-2 rounded-xl bg-slate-900 text-white">
-                    <Sparkles className="w-4 h-4" />
+              <div className="border-b border-slate-100 sticky top-0 bg-white/90 backdrop-blur-md z-10">
+                <div className="p-5 flex items-center justify-between">
+                  <div className="flex items-center space-x-2.5">
+                    <div className="p-2 rounded-xl bg-slate-900 text-white">
+                      <Sparkles className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-slate-900 text-lg">AI Compliance Audit</h3>
+                      <p className="text-xs text-slate-400 truncate max-w-[200px]">Ref: {selectedSubmission.id}</p>
+                    </div>
                   </div>
-                  <div>
-                    <h3 className="font-bold text-slate-900 text-lg">AI Compliance Audit</h3>
-                    <p className="text-xs text-slate-400 truncate max-w-[280px]">Ref: {selectedSubmission.id}</p>
+                  <div className="flex items-center space-x-2">
+                    {/* Admin Status Dropdown */}
+                    {isAdmin && (
+                      <div className="relative">
+                        <button
+                          onClick={() => setStatusDropdownOpen(!statusDropdownOpen)}
+                          disabled={updatingStatus}
+                          className={`inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-2 rounded-xl border transition-all ${
+                            selectedSubmission.status === "Approved"
+                              ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                              : selectedSubmission.status === "Action Required"
+                              ? "bg-rose-50 border-rose-200 text-rose-700"
+                              : selectedSubmission.status === "Under Review"
+                              ? "bg-amber-50 border-amber-200 text-amber-700"
+                              : "bg-slate-50 border-slate-200 text-slate-600"
+                          }`}
+                        >
+                          {updatingStatus ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                          )}
+                          <span>{selectedSubmission.status || "Pending"}</span>
+                          <ChevronDown className="w-3 h-3" />
+                        </button>
+                        {statusDropdownOpen && (
+                          <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl border border-slate-200 shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+                            {["Pending", "Under Review", "Approved", "Action Required"].map((status) => (
+                              <button
+                                key={status}
+                                onClick={() => handleStatusChange(status)}
+                                className={`w-full text-left px-4 py-2.5 text-xs font-semibold flex items-center space-x-2 transition-colors ${
+                                  selectedSubmission.status === status
+                                    ? "bg-slate-50 text-slate-900"
+                                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                                }`}
+                              >
+                                {status === "Approved" && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />}
+                                {status === "Action Required" && <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />}
+                                {status === "Under Review" && <Eye className="w-3.5 h-3.5 text-amber-500" />}
+                                {status === "Pending" && <Clock className="w-3.5 h-3.5 text-slate-400" />}
+                                <span>{status}</span>
+                                {selectedSubmission.status === status && <Check className="w-3 h-3 ml-auto text-slate-900" />}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <button
+                      onClick={() => setShowDrawer(false)}
+                      className="p-2 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-900 transition-colors"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
                   </div>
                 </div>
-                <button
-                  onClick={() => setShowDrawer(false)}
-                  className="p-2 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-900 transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
+
+                {/* Tab Bar */}
+                <div className="flex px-5 -mb-px">
+                  <button
+                    onClick={() => setDrawerTab("details")}
+                    className={`flex items-center space-x-1.5 px-4 py-2.5 text-xs font-bold border-b-2 transition-colors ${
+                      drawerTab === "details"
+                        ? "border-slate-900 text-slate-900"
+                        : "border-transparent text-slate-400 hover:text-slate-600"
+                    }`}
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>Audit Details</span>
+                  </button>
+                  <button
+                    onClick={() => setDrawerTab("comments")}
+                    className={`flex items-center space-x-1.5 px-4 py-2.5 text-xs font-bold border-b-2 transition-colors ${
+                      drawerTab === "comments"
+                        ? "border-slate-900 text-slate-900"
+                        : "border-transparent text-slate-400 hover:text-slate-600"
+                    }`}
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    <span>Comments</span>
+                    {comments.length > 0 && (
+                      <span className="px-1.5 py-0.5 rounded-md text-[10px] font-extrabold leading-none bg-indigo-100 text-indigo-700">
+                        {comments.length}
+                      </span>
+                    )}
+                  </button>
+                </div>
               </div>
 
-              {/* Drawer Body */}
-              <div className="p-6 space-y-6 flex-grow">
-                {/* File Quick view */}
-                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-100 space-y-3">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Submitted Asset</p>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-3">
-                      <div className="p-2 bg-white rounded-lg border border-slate-200 text-slate-600 shadow-xs">
-                        {selectedSubmission.fileType === "image" ? <ImageIcon className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
+              {/* ===== TAB: Audit Details ===== */}
+              {drawerTab === "details" && (
+                <div className="p-6 space-y-6 flex-grow overflow-y-auto">
+                  {/* File Quick view */}
+                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-100 space-y-3">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Submitted Asset</p>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-3">
+                        <div className="p-2 bg-white rounded-lg border border-slate-200 text-slate-600 shadow-xs">
+                          {selectedSubmission.fileType === "image" ? <ImageIcon className="w-5 h-5" /> : <FileText className="w-5 h-5" />}
+                        </div>
+                        <div className="max-w-[240px]">
+                          <p className="font-bold text-slate-900 text-sm truncate">{selectedSubmission.file_name}</p>
+                          <p className="text-[10px] text-slate-400 mt-0.5">By {selectedSubmission.userEmail}</p>
+                        </div>
                       </div>
-                      <div className="max-w-[240px]">
-                        <p className="font-bold text-slate-900 text-sm truncate">{selectedSubmission.file_name}</p>
-                        <p className="text-[10px] text-slate-400 mt-0.5">By {selectedSubmission.userEmail}</p>
-                      </div>
+                      {selectedSubmission.file_content && selectedSubmission.file_content !== "#" && (
+                        <a
+                          href={selectedSubmission.file_content}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs font-bold text-indigo-600 hover:underline flex items-center bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-lg"
+                        >
+                          View Original
+                        </a>
+                      )}
                     </div>
-                    {selectedSubmission.file_content && selectedSubmission.file_content !== "#" && (
-                      <a
-                        href={selectedSubmission.file_content}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs font-bold text-indigo-600 hover:underline flex items-center bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-lg"
-                      >
-                        View Original
-                      </a>
-                    )}
                   </div>
-                </div>
 
-                {/* AI Processing State Banner */}
-                {!selectedSubmission.ai_extracted ? (
-                  <div className="p-6 rounded-2xl border-2 border-dashed border-indigo-200 bg-indigo-50/50 flex flex-col items-center justify-center text-center space-y-3 animate-pulse">
-                    <Loader2 className="w-8 h-8 text-indigo-600 animate-spin" />
-                    <h4 className="font-bold text-indigo-900 text-sm">Gemini AI Audit Running...</h4>
-                    <p className="text-xs text-indigo-600 max-w-xs leading-relaxed">
-                      We are fetching the asset, performing OCR data extraction, and analyzing security guidelines.
-                    </p>
-                  </div>
-                ) : (
-                  <>
-                    {/* Compliance Status Block */}
-                    {selectedSubmission.extractedData?.complianceStatus === "Passed" ? (
-                      <div className="p-5 rounded-2xl border border-emerald-200 bg-emerald-50/60 flex items-start space-x-4 shadow-sm shadow-emerald-100">
-                        <div className="p-2.5 rounded-full bg-emerald-100 text-emerald-600 flex-shrink-0">
-                          <CheckCircle2 className="w-6 h-6" />
-                        </div>
-                        <div>
-                          <h4 className="font-extrabold text-emerald-950">Aviation Compliance Passed</h4>
-                          <p className="text-xs text-emerald-700 leading-relaxed mt-1">
-                            {selectedSubmission.extractedData?.complianceReason || "This document complies with all verified AAHK safety guidelines and is fully registered."}
-                          </p>
-                        </div>
-                      </div>
-                    ) : selectedSubmission.extractedData?.complianceStatus === "Action Required" ? (
-                      <div className="p-5 rounded-2xl border border-rose-200 bg-rose-50/60 flex items-start space-x-4 shadow-sm shadow-rose-100">
-                        <div className="p-2.5 rounded-full bg-rose-100 text-rose-600 flex-shrink-0">
-                          <AlertTriangle className="w-6 h-6" />
-                        </div>
-                        <div>
-                          <h4 className="font-extrabold text-rose-950">Audit Flags Raised</h4>
-                          <p className="text-xs text-rose-700 leading-relaxed mt-1">
-                            {selectedSubmission.extractedData?.complianceReason || "Review is requested due to missing signatures, verification checkmarks, or inconsistent fleet details."}
-                          </p>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="p-5 rounded-2xl border border-slate-200 bg-slate-50 flex items-start space-x-4">
-                        <div className="p-2.5 rounded-full bg-slate-200 text-slate-600 flex-shrink-0">
-                          <AlertTriangle className="w-6 h-6" />
-                        </div>
-                        <div>
-                          <h4 className="font-extrabold text-slate-800">Incomplete Audit Details</h4>
-                          <p className="text-xs text-slate-600 leading-relaxed mt-1">
-                            The AI could not safely determine safety compliance. Manual administrator review is requested.
-                          </p>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Extracted Details Grid */}
-                    <div className="space-y-3">
-                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Extracted Metadata</h4>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl flex items-center space-x-3">
-                          <Plane className="w-4 h-4 text-indigo-500" />
-                          <div>
-                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Airline</p>
-                            <p className="font-bold text-slate-900 text-sm">{selectedSubmission.extractedData?.airlineName || "Unknown"}</p>
-                          </div>
-                        </div>
-
-                        <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl flex items-center space-x-3">
-                          <Layers className="w-4 h-4 text-indigo-500" />
-                          <div>
-                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Model</p>
-                            <p className="font-bold text-slate-900 text-sm">{selectedSubmission.extractedData?.aircraftModel || "Unknown"}</p>
-                          </div>
-                        </div>
-
-                        <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl flex items-center space-x-3">
-                          <ShieldCheck className="w-4 h-4 text-indigo-500" />
-                          <div>
-                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Tail Number</p>
-                            <p className="font-bold text-slate-900 text-sm">{selectedSubmission.extractedData?.tailNumber || "Unknown"}</p>
-                          </div>
-                        </div>
-
-                        <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl flex items-center space-x-3">
-                          <Calendar className="w-4 h-4 text-indigo-500" />
-                          <div>
-                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Report Date</p>
-                            <p className="font-bold text-slate-900 text-sm">{selectedSubmission.extractedData?.updateDate || "Unknown"}</p>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Confidence Score Bar */}
-                    <div className="p-4 rounded-xl border border-slate-100 bg-slate-50 space-y-2">
-                      <div className="flex justify-between items-center">
-                        <div className="flex items-center space-x-1.5 text-xs font-bold text-slate-400 uppercase tracking-widest">
-                          <Percent className="w-3.5 h-3.5 text-indigo-500" />
-                          <span>AI Confidence Score</span>
-                        </div>
-                        <span className="font-extrabold text-slate-900 text-sm">{selectedSubmission.extractedData?.confidenceScore || 0}%</span>
-                      </div>
-                      <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
-                        <motion.div 
-                          initial={{ width: 0 }}
-                          animate={{ width: `${selectedSubmission.extractedData?.confidenceScore || 0}%` }}
-                          transition={{ duration: 0.8 }}
-                          className="h-full bg-gradient-to-r from-indigo-500 to-indigo-600 rounded-full" 
-                        />
-                      </div>
-                    </div>
-
-                    {/* Summary */}
-                    <div className="space-y-2">
-                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Aviation Fleet Summary</h4>
-                      <p className="text-sm text-slate-600 leading-relaxed bg-slate-50 border border-slate-100 p-4 rounded-xl whitespace-pre-wrap">
-                        {selectedSubmission.extractedData?.summary || "No description provided."}
+                  {/* AI Processing State Banner */}
+                  {!selectedSubmission.ai_extracted ? (
+                    <div className="p-6 rounded-2xl border-2 border-dashed border-indigo-200 bg-indigo-50/50 flex flex-col items-center justify-center text-center space-y-3 animate-pulse">
+                      <Loader2 className="w-8 h-8 text-indigo-600 animate-spin" />
+                      <h4 className="font-bold text-indigo-900 text-sm">Gemini AI Audit Running...</h4>
+                      <p className="text-xs text-indigo-600 max-w-xs leading-relaxed">
+                        We are fetching the asset, performing OCR data extraction, and analyzing security guidelines.
                       </p>
                     </div>
-                  </>
-                )}
-              </div>
+                  ) : (
+                    <>
+                      {/* Compliance Status Block */}
+                      {selectedSubmission.extractedData?.complianceStatus === "Passed" ? (
+                        <div className="p-5 rounded-2xl border border-emerald-200 bg-emerald-50/60 flex items-start space-x-4 shadow-sm shadow-emerald-100">
+                          <div className="p-2.5 rounded-full bg-emerald-100 text-emerald-600 flex-shrink-0">
+                            <CheckCircle2 className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <h4 className="font-extrabold text-emerald-950">Aviation Compliance Passed</h4>
+                            <p className="text-xs text-emerald-700 leading-relaxed mt-1">
+                              {selectedSubmission.extractedData?.complianceReason || "This document complies with all verified AAHK safety guidelines and is fully registered."}
+                            </p>
+                          </div>
+                        </div>
+                      ) : selectedSubmission.extractedData?.complianceStatus === "Action Required" ? (
+                        <div className="p-5 rounded-2xl border border-rose-200 bg-rose-50/60 flex items-start space-x-4 shadow-sm shadow-rose-100">
+                          <div className="p-2.5 rounded-full bg-rose-100 text-rose-600 flex-shrink-0">
+                            <AlertTriangle className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <h4 className="font-extrabold text-rose-950">Audit Flags Raised</h4>
+                            <p className="text-xs text-rose-700 leading-relaxed mt-1">
+                              {selectedSubmission.extractedData?.complianceReason || "Review is requested due to missing signatures, verification checkmarks, or inconsistent fleet details."}
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="p-5 rounded-2xl border border-slate-200 bg-slate-50 flex items-start space-x-4">
+                          <div className="p-2.5 rounded-full bg-slate-200 text-slate-600 flex-shrink-0">
+                            <AlertTriangle className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <h4 className="font-extrabold text-slate-800">Incomplete Audit Details</h4>
+                            <p className="text-xs text-slate-600 leading-relaxed mt-1">
+                              The AI could not safely determine safety compliance. Manual administrator review is requested.
+                            </p>
+                          </div>
+                        </div>
+                      )}
 
-              {/* Close Footer */}
-              <div className="p-6 border-t border-slate-100 sticky bottom-0 bg-white">
-                <button
-                  onClick={() => setShowDrawer(false)}
-                  className="w-full py-4 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800 transition-colors shadow-lg"
-                >
-                  Dismiss Audit Report
-                </button>
-              </div>
+                      {/* Extracted Details Grid */}
+                      <div className="space-y-3">
+                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Extracted Metadata</h4>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl flex items-center space-x-3">
+                            <Plane className="w-4 h-4 text-indigo-500" />
+                            <div>
+                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Airline</p>
+                              <p className="font-bold text-slate-900 text-sm">{selectedSubmission.extractedData?.airlineName || "Unknown"}</p>
+                            </div>
+                          </div>
+
+                          <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl flex items-center space-x-3">
+                            <Layers className="w-4 h-4 text-indigo-500" />
+                            <div>
+                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Model</p>
+                              <p className="font-bold text-slate-900 text-sm">{selectedSubmission.extractedData?.aircraftModel || "Unknown"}</p>
+                            </div>
+                          </div>
+
+                          <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl flex items-center space-x-3">
+                            <ShieldCheck className="w-4 h-4 text-indigo-500" />
+                            <div>
+                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Tail Number</p>
+                              <p className="font-bold text-slate-900 text-sm">{selectedSubmission.extractedData?.tailNumber || "Unknown"}</p>
+                            </div>
+                          </div>
+
+                          <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl flex items-center space-x-3">
+                            <Calendar className="w-4 h-4 text-indigo-500" />
+                            <div>
+                              <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Report Date</p>
+                              <p className="font-bold text-slate-900 text-sm">{selectedSubmission.extractedData?.updateDate || "Unknown"}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Confidence Score Bar */}
+                      <div className="p-4 rounded-xl border border-slate-100 bg-slate-50 space-y-2">
+                        <div className="flex justify-between items-center">
+                          <div className="flex items-center space-x-1.5 text-xs font-bold text-slate-400 uppercase tracking-widest">
+                            <Percent className="w-3.5 h-3.5 text-indigo-500" />
+                            <span>AI Confidence Score</span>
+                          </div>
+                          <span className="font-extrabold text-slate-900 text-sm">{selectedSubmission.extractedData?.confidenceScore || 0}%</span>
+                        </div>
+                        <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
+                          <motion.div 
+                            initial={{ width: 0 }}
+                            animate={{ width: `${selectedSubmission.extractedData?.confidenceScore || 0}%` }}
+                            transition={{ duration: 0.8 }}
+                            className="h-full bg-gradient-to-r from-indigo-500 to-indigo-600 rounded-full" 
+                          />
+                        </div>
+                      </div>
+
+                      {/* Summary */}
+                      <div className="space-y-2">
+                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Aviation Fleet Summary</h4>
+                        <p className="text-sm text-slate-600 leading-relaxed bg-slate-50 border border-slate-100 p-4 rounded-xl whitespace-pre-wrap">
+                          {selectedSubmission.extractedData?.summary || "No description provided."}
+                        </p>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* ===== TAB: Comments Thread ===== */}
+              {drawerTab === "comments" && (
+                <div className="flex flex-col flex-grow overflow-hidden">
+                  {/* Comments List */}
+                  <div className="flex-grow overflow-y-auto p-6 space-y-4">
+                    {comments.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-16 text-center space-y-3">
+                        <div className="p-4 rounded-full bg-slate-50 border border-slate-100 text-slate-300">
+                          <MessageSquare className="w-8 h-8" />
+                        </div>
+                        <p className="font-semibold text-slate-500">No comments yet</p>
+                        <p className="text-xs text-slate-400 max-w-[260px] leading-relaxed">
+                          Start a conversation about this audit. Comments are visible to administrators and the submitting airline.
+                        </p>
+                      </div>
+                    ) : (
+                      comments.map((comment) => {
+                        const isOwnComment = comment.authorEmail === user?.email;
+                        const isCommentAdmin = isUserAdmin(comment.authorEmail);
+                        return (
+                          <div
+                            key={comment.id}
+                            className={`flex ${isOwnComment ? "justify-end" : "justify-start"}`}
+                          >
+                            <div className={`max-w-[85%] space-y-1 ${isOwnComment ? "items-end" : "items-start"}`}>
+                              {/* Author info */}
+                              <div className={`flex items-center space-x-1.5 ${isOwnComment ? "justify-end" : "justify-start"}`}>
+                                <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold ${
+                                  isCommentAdmin 
+                                    ? "bg-slate-900 text-white" 
+                                    : "bg-indigo-100 text-indigo-700"
+                                }`}>
+                                  {comment.authorName?.charAt(0)?.toUpperCase() || <User2 className="w-3 h-3" />}
+                                </div>
+                                <span className="text-[10px] font-bold text-slate-500">
+                                  {comment.authorName || comment.authorEmail?.split("@")[0]}
+                                </span>
+                                {isCommentAdmin && (
+                                  <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">ADMIN</span>
+                                )}
+                              </div>
+                              {/* Bubble */}
+                              <div
+                                className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
+                                  isOwnComment
+                                    ? "bg-slate-900 text-white rounded-br-md"
+                                    : "bg-slate-100 text-slate-800 border border-slate-200 rounded-bl-md"
+                                }`}
+                              >
+                                {comment.text}
+                              </div>
+                              {/* Timestamp */}
+                              <p className={`text-[10px] text-slate-400 ${isOwnComment ? "text-right" : "text-left"}`}>
+                                {comment.createdAt?.seconds
+                                  ? new Date(comment.createdAt.seconds * 1000).toLocaleString(undefined, {
+                                      month: "short",
+                                      day: "numeric",
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })
+                                  : "Just now"}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Comment Input Bar */}
+                  <div className="p-4 border-t border-slate-100 bg-white sticky bottom-0">
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="text"
+                        value={commentInput}
+                        onChange={(e) => setCommentInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handlePostComment(); }}}
+                        placeholder="Add a comment..."
+                        disabled={postingComment}
+                        className="flex-grow px-4 py-3 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-300 placeholder:text-slate-400 disabled:opacity-50 transition-all"
+                      />
+                      <button
+                        onClick={handlePostComment}
+                        disabled={!commentInput.trim() || postingComment}
+                        className="p-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm flex-shrink-0"
+                      >
+                        {postingComment ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Send className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Footer (only visible in details tab) */}
+              {drawerTab === "details" && (
+                <div className="p-6 border-t border-slate-100 sticky bottom-0 bg-white">
+                  <button
+                    onClick={() => setShowDrawer(false)}
+                    className="w-full py-4 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800 transition-colors shadow-lg"
+                  >
+                    Dismiss Audit Report
+                  </button>
+                </div>
+              )}
             </motion.div>
           </>
         )}
