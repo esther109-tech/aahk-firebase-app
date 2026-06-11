@@ -55,9 +55,9 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // Compliance Snapshots — admin-read, Cloud Function write (admin SDK bypasses rules)
+    // Compliance Snapshots — admin full read; airline staff read own airline's snapshots
     match /compliance-snapshots/{doc} {
-      allow read: if isAdmin();
+      allow read: if isAdmin() || (request.auth != null && isSameAirline(resource.data));
       allow write: if false;
     }
   }

@@ -48,7 +48,7 @@ export default function AirlineOverview({ airlineName }: Props) {
                 if (data.week === currentWeek) setSnapshot(data);
                 else setPrevSnapshot(data);
             });
-        });
+        }).catch((err) => console.warn("AirlineOverview: could not load snapshot —", err));
 
         const q = query(
             collection(db, "airline-upload"),

@@ -33,14 +33,19 @@ export default function AdminOverview() {
 
     useEffect(() => {
         async function load() {
-            const cutoff = Timestamp.fromDate(weeksAgo(8));
-            const [snapSnap, subSnap] = await Promise.all([
-                getDocs(query(collection(db, "compliance-snapshots"), where("weekStart", ">=", cutoff))),
-                getDocs(query(collection(db, "airline-upload"), where("status", "in", ["Pending Review", "Under Review"]))),
-            ]);
-            setSnapshots(snapSnap.docs.map((d) => d.data() as Snapshot));
-            setSubmissions(subSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-            setLoading(false);
+            try {
+                const cutoff = Timestamp.fromDate(weeksAgo(8));
+                const [snapSnap, subSnap] = await Promise.all([
+                    getDocs(query(collection(db, "compliance-snapshots"), where("weekStart", ">=", cutoff))),
+                    getDocs(query(collection(db, "airline-upload"), where("status", "in", ["Pending Review", "Under Review"]))),
+                ]);
+                setSnapshots(snapSnap.docs.map((d) => d.data() as Snapshot));
+                setSubmissions(subSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+            } catch (err) {
+                console.warn("AdminOverview: could not load data —", err);
+            } finally {
+                setLoading(false);
+            }
         }
         load();
     }, []);
