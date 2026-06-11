@@ -1,5 +1,6 @@
 import { onRequest } from "firebase-functions/v2/https";
 import { onDocumentCreated } from "firebase-functions/v2/firestore";
+export { onFleetInventoryWrite } from "./snapshotTrigger";
 import * as admin from "firebase-admin";
 import * as logger from "firebase-functions/logger";
 import { defineSecret } from "firebase-functions/params";

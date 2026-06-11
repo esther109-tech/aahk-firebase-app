@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getStorage } from "firebase/storage";
-import { getFirestore } from "firebase/firestore";
+import { getStorage, connectStorageEmulator } from "firebase/storage";
+import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 
 const firebaseConfig = {
@@ -19,4 +19,19 @@ const storage = getStorage(app);
 const db = getFirestore(app);
 const auth = getAuth(app);
 
+// Connect to emulators in development mode
+if (process.env.NODE_ENV === "development") {
+  const g = globalThis as any;
+  if (!g._firebaseEmulatorsConnected) {
+    try {
+      connectFirestoreEmulator(db, "127.0.0.1", 8080);
+      connectStorageEmulator(storage, "127.0.0.1", 9199);
+      g._firebaseEmulatorsConnected = true;
+    } catch (err) {
+      console.warn("Firebase emulators connection warning:", err);
+    }
+  }
+}
+
 export { app, storage, db, auth };
+

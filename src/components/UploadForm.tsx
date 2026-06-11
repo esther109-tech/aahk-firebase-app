@@ -253,7 +253,8 @@ export default function UploadForm() {
                     // 4. Trigger Email Notification via HTTPS Function
                     try {
                         const userToken = await auth.currentUser?.getIdToken();
-                        await fetch("https://asia-east1-gcp-tw-sandbox.cloudfunctions.net/onAirlineUpdateCreated", {
+                        const functionsUrl = process.env.NEXT_PUBLIC_AIRLINE_UPDATE_CREATED_URL || "https://asia-east1-gcp-tw-sandbox.cloudfunctions.net/onAirlineUpdateCreated";
+                        await fetch(functionsUrl, {
                             method: "POST",
                             headers: {
                                 "Content-Type": "application/json",
