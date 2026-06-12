@@ -63,7 +63,15 @@ function formatMetadataSummary(action: string, metadata: Record<string, unknown>
     case "submission.comment_added":
       return `"${metadata.commentPreview}"`;
     case "ocr.completed":
-      return `Tail: ${metadata.tailNumber} · Confidence: ${metadata.confidenceScore}% · ${metadata.complianceStatus}`;
+      return `Tail: ${metadata.tailNumber} · ${metadata.complianceStatus}`;
+    case "investigation.complete":
+      return `Score: ${metadata.finalScore}/100 · ${metadata.status} · ${metadata.totalRounds} round(s)`;
+    case "investigation.degrading":
+      return `Degraded ${metadata.previousScore}→${metadata.currentScore} at round ${metadata.round}`;
+    case "investigation.adversarial":
+      return `${(metadata.confirmed_issues as string[] | undefined)?.length ?? 0} confirmed · ${(metadata.cleared_issues as string[] | undefined)?.length ?? 0} cleared`;
+    case "investigation.auto_executed":
+      return `Auto-executed at score ${metadata.score}/100`;
     case "ocr.failed":
       return `Error: ${String(metadata.errorMessage).slice(0, 120)}`;
     case "submission.created":

@@ -327,7 +327,7 @@ export default function SubmissionsTable({
                     <StatusBadge submission={sub} />
                   </td>
                   <td className="py-3.5 align-middle">
-                    <ConfidenceBadge score={sub.extractedData?.confidenceScore} />
+                    <ConfidenceBadge score={sub.investigation?.score ?? sub.extractedData?.confidenceScore} />
                   </td>
                   <td className="py-3.5 text-right align-middle pr-1">
                     <button

@@ -9,6 +9,7 @@ interface Submission {
     status?: string;
     createdAt?: any;
     extractedData?: { tailNumber?: string; confidenceScore?: number };
+    investigation?: { score?: number };
     ai_extracted?: boolean;
 }
 
@@ -72,7 +73,7 @@ export default function AlertsFeed({ submissions, current, previous, truncate }:
 
     submissions.forEach((s) => {
         if (!s.ai_extracted) return;
-        const score = s.extractedData?.confidenceScore ?? 100;
+        const score = s.investigation?.score ?? s.extractedData?.confidenceScore ?? 100;
         if (score >= 70) return;
         alerts.push({
             id: `ocr-${s.id}`,

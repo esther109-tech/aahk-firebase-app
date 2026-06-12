@@ -247,10 +247,10 @@ export default function AuditDrawer({ submission, user, isAdmin, onClose, onStat
                                             <div className="flex items-center space-x-1.5 text-xs font-bold text-slate-400 uppercase tracking-widest">
                                                 <Percent className="w-3.5 h-3.5 text-indigo-500" /><span>AI Confidence Score</span>
                                             </div>
-                                            <span className="font-extrabold text-slate-900 text-sm">{currentSubmission.extractedData?.confidenceScore || 0}%</span>
+                                            <span className="font-extrabold text-slate-900 text-sm">{currentSubmission.investigation?.score ?? currentSubmission.extractedData?.confidenceScore ?? 0}%</span>
                                         </div>
                                         <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
-                                            <motion.div initial={{ width: 0 }} animate={{ width: `${currentSubmission.extractedData?.confidenceScore || 0}%` }}
+                                            <motion.div initial={{ width: 0 }} animate={{ width: `${currentSubmission.investigation?.score ?? currentSubmission.extractedData?.confidenceScore ?? 0}%` }}
                                                 transition={{ duration: 0.8 }} className="h-full bg-gradient-to-r from-indigo-500 to-indigo-600 rounded-full" />
                                         </div>
                                     </div>
