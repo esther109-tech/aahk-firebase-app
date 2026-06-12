@@ -44,9 +44,18 @@ export default function AirlineOverview({ airlineName }: Props) {
             where("week", "in", [currentWeek, prevWeek])
         )).then((snap) => {
             snap.docs.forEach((d) => {
-                const data = d.data();
-                if (data.week === currentWeek) setSnapshot(data);
-                else setPrevSnapshot(data);
+                const raw = d.data();
+                const parsed = {
+                    airlineName: String(raw.airlineName ?? ""),
+                    week: String(raw.week ?? ""),
+                    weekStart: raw.weekStart,
+                    totalAircraft: Number(raw.totalAircraft ?? 0),
+                    compliantAircraft: Number(raw.compliantAircraft ?? 0),
+                    complianceRate: Number(raw.complianceRate ?? 0),
+                    pendingReviews: Number(raw.pendingReviews ?? 0),
+                };
+                if (parsed.week === currentWeek) setSnapshot(parsed);
+                else setPrevSnapshot(parsed);
             });
         }).catch((err) => console.warn("AirlineOverview: could not load snapshot —", err));
 

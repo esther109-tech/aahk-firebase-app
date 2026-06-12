@@ -39,7 +39,18 @@ export default function AdminOverview() {
                     getDocs(query(collection(db, "compliance-snapshots"), where("weekStart", ">=", cutoff))),
                     getDocs(query(collection(db, "airline-upload"), where("status", "in", ["Pending Review", "Under Review"]))),
                 ]);
-                setSnapshots(snapSnap.docs.map((d) => d.data() as Snapshot));
+                setSnapshots(snapSnap.docs.map((d) => {
+                    const raw = d.data();
+                    return {
+                        airlineName: String(raw.airlineName ?? ""),
+                        week: String(raw.week ?? ""),
+                        weekStart: raw.weekStart,
+                        totalAircraft: Number(raw.totalAircraft ?? 0),
+                        compliantAircraft: Number(raw.compliantAircraft ?? 0),
+                        complianceRate: Number(raw.complianceRate ?? 0),
+                        pendingReviews: Number(raw.pendingReviews ?? 0),
+                    } as Snapshot;
+                }));
                 setSubmissions(subSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
             } catch (err) {
                 console.warn("AdminOverview: could not load data —", err);

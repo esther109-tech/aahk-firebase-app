@@ -5,7 +5,6 @@ import { useSearchParams } from "next/navigation";
 import { collection, query, where, getDocs, Timestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import ComplianceTrendChart from "@/components/ComplianceTrendChart";
-import { getWeekStart } from "@/lib/utils";
 
 interface Snapshot {
     airlineName: string;
@@ -17,6 +16,18 @@ interface Snapshot {
     pendingReviews: number;
 }
 
+function parseSnap(raw: any): Snapshot {
+    return {
+        airlineName: String(raw.airlineName ?? ""),
+        week: String(raw.week ?? ""),
+        weekStart: raw.weekStart,
+        totalAircraft: Number(raw.totalAircraft ?? 0),
+        compliantAircraft: Number(raw.compliantAircraft ?? 0),
+        complianceRate: Number(raw.complianceRate ?? 0),
+        pendingReviews: Number(raw.pendingReviews ?? 0),
+    };
+}
+
 function TrendsContent() {
     const params = useSearchParams();
     const focusAirline = params.get("airline") ?? null;
@@ -26,13 +37,13 @@ function TrendsContent() {
     useEffect(() => {
         const cutoff = Timestamp.fromDate(new Date(Date.now() - 52 * 7 * 24 * 3600 * 1000));
         getDocs(query(collection(db, "compliance-snapshots"), where("weekStart", ">=", cutoff))).then((snap) => {
-            setSnapshots(snap.docs.map((d) => d.data() as Snapshot));
+            setSnapshots(snap.docs.map((d) => parseSnap(d.data())));
             setLoading(false);
         });
     }, []);
 
     const displayed = focusAirline
-        ? snapshots.filter((s) => s.airlineName === focusAirline || s.airlineName === s.airlineName)
+        ? snapshots.filter((s) => s.airlineName === focusAirline)
         : snapshots;
 
     const airlines = [...new Set(snapshots.map((s) => s.airlineName))].sort();
@@ -77,9 +88,10 @@ function TrendsContent() {
                                         <td className="px-6 py-2.5 text-xs font-mono text-slate-500">{week}</td>
                                         {airlines.map((a) => {
                                             const s = snapshots.find((x) => x.week === week && x.airlineName === a);
+                                            const rate = s ? Number(s.complianceRate) : null;
                                             return (
-                                                <td key={a} className={`px-4 py-2.5 text-right text-xs font-semibold ${s ? (s.complianceRate >= 90 ? "text-emerald-600" : s.complianceRate >= 75 ? "text-amber-600" : "text-rose-600") : "text-slate-300"}`}>
-                                                    {s ? `${s.complianceRate.toFixed(1)}%` : "—"}
+                                                <td key={a} className={`px-4 py-2.5 text-right text-xs font-semibold ${rate !== null ? (rate >= 90 ? "text-emerald-600" : rate >= 75 ? "text-amber-600" : "text-rose-600") : "text-slate-300"}`}>
+                                                    {rate !== null ? `${rate.toFixed(1)}%` : "—"}
                                                 </td>
                                             );
                                         })}
