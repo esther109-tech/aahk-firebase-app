@@ -1,6 +1,7 @@
 import { onRequest } from "firebase-functions/v2/https";
 import { onDocumentCreated } from "firebase-functions/v2/firestore";
 export { onFleetInventoryWrite } from "./snapshotTrigger";
+export { onInvestigationTrigger } from "./investigation";
 import * as admin from "firebase-admin";
 import * as logger from "firebase-functions/logger";
 import { defineSecret } from "firebase-functions/params";
@@ -270,8 +271,7 @@ Your task is to analyze the provided document content and extract all human-read
 4. Assess 'complianceStatus':
    - "Passed" if the document appears complete, consistent, and free of anomalies.
    - "Action Required" if there are missing critical data, inconsistencies, safety concerns, or expired dates.
-   - "Unknown" if there is insufficient information to assess.
-5. Set 'confidenceScore' (0-100) reflecting the clarity and completeness of the extracted information.`;
+   - "Unknown" if there is insufficient information to assess.`;
 
         const responseSchema = {
             type: "OBJECT",
@@ -286,7 +286,6 @@ Your task is to analyze the provided document content and extract all human-read
                     enum: ["Passed", "Action Required", "Unknown"]
                 },
                 complianceReason: { type: "STRING" },
-                confidenceScore: { type: "INTEGER" },
                 detectedFields: {
                     type: "ARRAY",
                     items: {
@@ -307,7 +306,6 @@ Your task is to analyze the provided document content and extract all human-read
                 "summary",
                 "complianceStatus",
                 "complianceReason",
-                "confidenceScore",
                 "detectedFields"
             ]
         };
@@ -394,7 +392,6 @@ Your task is to analyze the provided document content and extract all human-read
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
                 metadata: {
                     tailNumber: extractedData.tailNumber,
-                    confidenceScore: extractedData.confidenceScore,
                     complianceStatus: extractedData.complianceStatus,
                     processingMethod,
                     detectedFieldCount: extractedData.detectedFields?.length ?? 0,
