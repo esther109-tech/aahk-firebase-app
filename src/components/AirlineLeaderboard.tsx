@@ -42,7 +42,7 @@ export default function AirlineLeaderboard({ current, previous }: Props) {
             {sorted.map((snap, i) => {
                 const wow = getWoW(snap.airlineName, snap.complianceRate);
                 return (
-                    <button key={snap.airlineName} onClick={() => router.push(`/dashboard/trends?airline=${encodeURIComponent(snap.airlineName)}`)}
+                    <button key={`${snap.airlineName}-${i}`} onClick={() => router.push(`/dashboard/trends?airline=${encodeURIComponent(snap.airlineName)}`)}
                         className="w-full flex items-center gap-3 p-2.5 rounded-xl hover:bg-indigo-50/50 transition-colors group text-left">
                         <span className="text-base w-6 text-center shrink-0">{MEDALS[i] ?? <span className="text-xs font-bold text-slate-400">{i + 1}</span>}</span>
                         <span className="text-sm font-semibold text-slate-700 w-36 truncate group-hover:text-indigo-700 transition-colors">{snap.airlineName}</span>
