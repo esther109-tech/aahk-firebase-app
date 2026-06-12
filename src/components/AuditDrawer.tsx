@@ -10,7 +10,7 @@ import { isUserAdmin } from "@/lib/utils";
 import {
     FileText, Image as ImageIcon, Eye, Clock, AlertTriangle, CheckCircle2,
     X, Sparkles, Loader2, Calendar, Layers, Percent, Check,
-    ChevronDown, Trash2, MessageSquare, Send, ShieldCheck, Plane, User2,
+    ChevronDown, Trash2, MessageSquare, Send, ShieldCheck, Plane, User2, List,
 } from "lucide-react";
 
 interface Props {
@@ -191,8 +191,8 @@ export default function AuditDrawer({ submission, user, isAdmin, onClose, onStat
                             {!currentSubmission.ai_extracted ? (
                                 <div className="p-6 rounded-2xl border-2 border-dashed border-indigo-200 bg-indigo-50/50 flex flex-col items-center justify-center text-center space-y-3 animate-pulse">
                                     <Loader2 className="w-8 h-8 text-indigo-600 animate-spin" />
-                                    <h4 className="font-bold text-indigo-900 text-sm">Gemini AI Audit Running...</h4>
-                                    <p className="text-xs text-indigo-600 max-w-xs leading-relaxed">Performing OCR extraction and analyzing compliance guidelines.</p>
+                                    <h4 className="font-bold text-indigo-900 text-sm">Document AI OCR Running...</h4>
+                                    <p className="text-xs text-indigo-600 max-w-xs leading-relaxed">Extracting all readable fields, then running compliance analysis.</p>
                                 </div>
                             ) : (
                                 <>
@@ -255,8 +255,37 @@ export default function AuditDrawer({ submission, user, isAdmin, onClose, onStat
                                         </div>
                                     </div>
 
+                                    {currentSubmission.extractedData?.detectedFields?.length > 0 && (
+                                        <div className="space-y-2">
+                                            <div className="flex items-center justify-between">
+                                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center space-x-1.5">
+                                                    <List className="w-3.5 h-3.5 text-indigo-400" />
+                                                    <span>All Detected Fields</span>
+                                                </h4>
+                                                <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-md">
+                                                    {currentSubmission.extractedData.detectedFields.length} fields
+                                                </span>
+                                            </div>
+                                            <div className="border border-slate-100 rounded-xl overflow-hidden">
+                                                {currentSubmission.extractedData.detectedFields.map((field: { name: string; value: string }, i: number) => (
+                                                    <div key={i} className={`flex items-start gap-3 px-4 py-2.5 text-xs ${i % 2 === 0 ? "bg-white" : "bg-slate-50"}`}>
+                                                        <span className="font-semibold text-slate-500 min-w-[120px] flex-shrink-0 truncate">{field.name}</span>
+                                                        <span className="font-bold text-slate-900 break-words">{field.value || "—"}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
                                     <div className="space-y-2">
-                                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Aviation Fleet Summary</h4>
+                                        <div className="flex items-center justify-between">
+                                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Document Summary</h4>
+                                            {currentSubmission.extractedData?.processingMethod && (
+                                                <span className="text-[10px] font-bold text-indigo-500 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-md">
+                                                    {currentSubmission.extractedData.processingMethod}
+                                                </span>
+                                            )}
+                                        </div>
                                         <p className="text-sm text-slate-600 leading-relaxed bg-slate-50 border border-slate-100 p-4 rounded-xl whitespace-pre-wrap">
                                             {currentSubmission.extractedData?.summary || "No description provided."}
                                         </p>

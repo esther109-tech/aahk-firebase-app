@@ -7,7 +7,68 @@ import { defineSecret } from "firebase-functions/params";
 import { setSmtpCredentials } from "./helpers";
 import config from "./config";
 import { GoogleGenAI } from "@google/genai";
-import * as mammoth from "mammoth";
+import { DocumentProcessorServiceClient } from "@google-cloud/documentai";
+
+// Document AI processor (us region, project gcp-tw-sandbox)
+const DOCUMENT_AI_PROCESSOR =
+    "projects/593899410363/locations/us/processors/6e517f811613ce";
+
+const docAIClient = new DocumentProcessorServiceClient({
+    apiEndpoint: "us-documentai.googleapis.com",
+});
+
+interface DocAIResult {
+    fullText: string;
+    formFields: Array<{ name: string; value: string }>;
+    tables: Array<{ headers: string[]; rows: string[][] }>;
+}
+
+function extractTextFromAnchor(
+    fullText: string,
+    anchor: { textSegments?: Array<{ startIndex?: number | string | null; endIndex?: number | string | null }> | null } | null | undefined
+): string {
+    if (!anchor?.textSegments?.length) return "";
+    return anchor.textSegments
+        .map((seg) => fullText.slice(Number(seg.startIndex ?? 0), Number(seg.endIndex ?? 0)))
+        .join("");
+}
+
+async function callDocumentAI(buffer: Buffer, mimeType: string): Promise<DocAIResult> {
+    const [result] = await docAIClient.processDocument({
+        name: DOCUMENT_AI_PROCESSOR,
+        rawDocument: {
+            content: buffer.toString("base64"),
+            mimeType,
+        },
+    });
+
+    const document = result.document;
+    const fullText: string = (document as any)?.text ?? "";
+    const formFields: Array<{ name: string; value: string }> = [];
+    const tables: Array<{ headers: string[]; rows: string[][] }> = [];
+
+    for (const page of (document as any)?.pages ?? []) {
+        for (const field of page.formFields ?? []) {
+            const name = extractTextFromAnchor(fullText, field.fieldName?.textAnchor).trim();
+            const value = extractTextFromAnchor(fullText, field.fieldValue?.textAnchor).trim();
+            if (name) formFields.push({ name, value });
+        }
+
+        for (const table of page.tables ?? []) {
+            const headers = (table.headerRows?.[0]?.cells ?? []).map((cell: any) =>
+                extractTextFromAnchor(fullText, cell.layout?.textAnchor).trim()
+            );
+            const rows = (table.bodyRows ?? []).map((row: any) =>
+                (row.cells ?? []).map((cell: any) =>
+                    extractTextFromAnchor(fullText, cell.layout?.textAnchor).trim()
+                )
+            );
+            if (headers.length || rows.length) tables.push({ headers, rows });
+        }
+    }
+
+    return { fullText, formFields, tables };
+}
 
 const geminiApiKeySecret = defineSecret("GEMINI_API_KEY");
 
@@ -200,13 +261,17 @@ export const onAirlineUploadOCRTrigger = onDocumentCreated({
         // 2. Set up Gemini client
         const ai = new GoogleGenAI({ apiKey: geminiApiKeySecret.value() });
 
-        const systemInstruction = `You are an expert aviation compliance auditor and OCR data parser working for the Airport Authority Hong Kong (AAHK).
-Your task is to analyze the provided fleet update (which is either an uploaded aircraft document or an image of the aircraft/fleet asset).
-Extract key metadata and perform a rigorous compliance audit. If details are missing, use analytical deduction or mark them as "Unknown".
-Evaluate whether the details comply with aviation safety guidelines. Set complianceStatus to:
-- "Passed" if all information is consistent and safe.
-- "Action Required" if there are safety warnings, inconsistencies, missing critical dates, or signs of non-compliance.
-- "Unknown" if there is insufficient information.`;
+        const systemInstruction = `You are an expert document analyst and OCR data parser.
+Your task is to analyze the provided document content and extract all human-readable information, regardless of domain or industry.
+
+1. In 'detectedFields', list EVERY identifiable piece of structured information found: field labels and values, dates, names, IDs, codes, reference numbers, amounts, statuses — be comprehensive, capture everything.
+2. Populate the aviation-specific fields (airlineName, aircraftModel, tailNumber, updateDate) if they appear in the document; otherwise set them to "Unknown".
+3. Write a concise 'summary' describing what the document contains and its purpose.
+4. Assess 'complianceStatus':
+   - "Passed" if the document appears complete, consistent, and free of anomalies.
+   - "Action Required" if there are missing critical data, inconsistencies, safety concerns, or expired dates.
+   - "Unknown" if there is insufficient information to assess.
+5. Set 'confidenceScore' (0-100) reflecting the clarity and completeness of the extracted information.`;
 
         const responseSchema = {
             type: "OBJECT",
@@ -216,60 +281,76 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
                 tailNumber: { type: "STRING" },
                 updateDate: { type: "STRING" },
                 summary: { type: "STRING" },
-                complianceStatus: { 
-                    type: "STRING", 
-                    enum: ["Passed", "Action Required", "Unknown"] 
+                complianceStatus: {
+                    type: "STRING",
+                    enum: ["Passed", "Action Required", "Unknown"]
                 },
                 complianceReason: { type: "STRING" },
-                confidenceScore: { type: "INTEGER" }
+                confidenceScore: { type: "INTEGER" },
+                detectedFields: {
+                    type: "ARRAY",
+                    items: {
+                        type: "OBJECT",
+                        properties: {
+                            name: { type: "STRING" },
+                            value: { type: "STRING" }
+                        },
+                        required: ["name", "value"]
+                    }
+                }
             },
             required: [
-                "airlineName", 
-                "aircraftModel", 
-                "tailNumber", 
-                "updateDate", 
-                "summary", 
-                "complianceStatus", 
-                "complianceReason", 
-                "confidenceScore"
+                "airlineName",
+                "aircraftModel",
+                "tailNumber",
+                "updateDate",
+                "summary",
+                "complianceStatus",
+                "complianceReason",
+                "confidenceScore",
+                "detectedFields"
             ]
         };
 
         let contents: any[] = [];
+        let processingMethod = "gemini-multimodal";
 
-        // 3. Process according to file type
-        if (fileType === "image" || fileName.toLowerCase().endsWith(".png") || fileName.toLowerCase().endsWith(".jpg") || fileName.toLowerCase().endsWith(".jpeg")) {
-            logger.info("Processing as IMAGE multimodal OCR.");
-            let mimeType = "image/jpeg";
-            if (fileName.toLowerCase().endsWith(".png")) {
-                mimeType = "image/png";
-            } else if (fileName.toLowerCase().endsWith(".webp")) {
-                mimeType = "image/webp";
+        // 3. Resolve MIME type — supported: image/jpeg, image/png, image/webp, application/pdf
+        const lowerName = fileName.toLowerCase();
+        let mimeType = "image/jpeg";
+        if (lowerName.endsWith(".png")) mimeType = "image/png";
+        else if (lowerName.endsWith(".webp")) mimeType = "image/webp";
+        else if (fileType === "pdf" || lowerName.endsWith(".pdf")) mimeType = "application/pdf";
+
+        // 4. Try Document AI first; fall back to Gemini multimodal on failure
+        try {
+            logger.info(`Processing with Document AI OCR (mimeType: ${mimeType})...`);
+            const docAI = await callDocumentAI(buffer, mimeType);
+            logger.info(`Document AI: ${docAI.fullText.length} chars, ${docAI.formFields.length} form fields, ${docAI.tables.length} tables.`);
+
+            let contextText = `Document Text:\n${docAI.fullText}`;
+            if (docAI.formFields.length > 0) {
+                contextText += `\n\nDetected Form Fields:\n${docAI.formFields.map((f) => `${f.name}: ${f.value}`).join("\n")}`;
+            }
+            if (docAI.tables.length > 0) {
+                contextText += `\n\nDetected Tables:\n${docAI.tables.map((t, i) =>
+                    `Table ${i + 1}:\nHeaders: ${t.headers.join(" | ")}\n${t.rows.map((r) => r.join(" | ")).join("\n")}`
+                ).join("\n\n")}`;
             }
 
+            contents = [`${contextText}\n\nAnalyze this document and extract all human-readable information.`];
+            processingMethod = "documentai+gemini";
+        } catch (docAIErr: any) {
+            logger.warn(`Document AI failed (${docAIErr?.message}), falling back to Gemini multimodal.`);
             contents = [
-                {
-                    inlineData: {
-                        mimeType,
-                        data: buffer.toString("base64")
-                    }
-                },
-                "Extract structured details from this fleet asset image and audit it."
+                { inlineData: { mimeType, data: buffer.toString("base64") } },
+                "Extract all human-readable structured information from this document."
             ];
-        } else {
-            // Assume document (.docx)
-            logger.info("Processing as DOCUMENT (.docx) text parsing.");
-            const mammothResult = await mammoth.extractRawText({ buffer });
-            const docText = mammothResult.value;
-            logger.info(`Extracted raw text. Length: ${docText.length} characters.`);
-
-            contents = [
-                `Please audit this extracted fleet report document text:\n\n${docText}`
-            ];
+            processingMethod = "gemini-multimodal";
         }
 
         // 4. Run Gemini model (with retry on rate limits, 5xx, empty responses)
-        logger.info("Calling Gemini 2.5 Flash...");
+        logger.info(`Calling Gemini 2.5 Flash for semantic analysis (processing method: ${processingMethod})...`);
         const { result: extractedData, retryCount: _geminiRetries } = await retryWithBackoff(
             async () => {
                 const responseResult = await ai.models.generateContent({
@@ -297,7 +378,7 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
         const db = admin.firestore();
         logger.info("Updating Firestore document with AI-extracted metadata...");
         await db.collection("airline-upload").doc(docId).update({
-            extractedData: extractedData,
+            extractedData: { ...extractedData, processingMethod },
             ai_extracted: true,
             status: extractedData.complianceStatus === "Passed" ? "Approved" : "Action Required"
         });
@@ -309,12 +390,14 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
                 submissionId: docId,
                 airlineName: extractedData.airlineName || "Unknown",
                 action: "ocr.completed",
-                actor: { uid: "system", email: "ocr@skygate.aero", displayName: "Gemini OCR" },
+                actor: { uid: "system", email: "ocr@skygate.aero", displayName: "Document AI + Gemini" },
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
                 metadata: {
                     tailNumber: extractedData.tailNumber,
                     confidenceScore: extractedData.confidenceScore,
                     complianceStatus: extractedData.complianceStatus,
+                    processingMethod,
+                    detectedFieldCount: extractedData.detectedFields?.length ?? 0,
                     ...(totalRetries > 0 && { retryCount: totalRetries }),
                 },
             });
@@ -369,7 +452,7 @@ Evaluate whether the details comply with aviation safety guidelines. Set complia
                 submissionId: docId,
                 airlineName: "Unknown",
                 action: "ocr.failed",
-                actor: { uid: "system", email: "ocr@skygate.aero", displayName: "Gemini OCR" },
+                actor: { uid: "system", email: "ocr@skygate.aero", displayName: "Document AI + Gemini" },
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
                 metadata: {
                     errorMessage: String(err.message || "Unknown error").slice(0, 500),

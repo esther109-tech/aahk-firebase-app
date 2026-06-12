@@ -5,7 +5,7 @@ import { storage, db, auth } from "@/lib/firebase";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import { writeAuditEvent } from "@/lib/audit";
-import { getAirlineFromEmail } from "@/lib/utils";
+import { getAirlineFromEmail, isUserAdmin, AIRLINE_OPTIONS } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 import { loadGoogleScripts, requestGoogleAccessToken, openGooglePicker } from "@/lib/googleDrive";
 import { 
@@ -44,6 +44,7 @@ export default function UploadForm() {
     const [customStatusText, setCustomStatusText] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [notifyEmail, setNotifyEmail] = useState("");
+    const [selectedAirline, setSelectedAirline] = useState("");
 
     // Google Drive Specific State
     const [driveToken, setDriveToken] = useState<string | null>(null);
@@ -91,15 +92,12 @@ export default function UploadForm() {
     };
 
     const validateAndSetFile = (selectedFile: File) => {
-        const isDocx =
-            selectedFile.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-            selectedFile.name.toLowerCase().endsWith(".docx");
+        const name = selectedFile.name.toLowerCase();
         const isImage = selectedFile.type.startsWith("image/") &&
-            (selectedFile.name.toLowerCase().endsWith(".png") ||
-                selectedFile.name.toLowerCase().endsWith(".jpg") ||
-                selectedFile.name.toLowerCase().endsWith(".jpeg"));
+            (name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg"));
+        const isPDF = selectedFile.type === "application/pdf" || name.endsWith(".pdf");
 
-        if (isDocx || isImage) {
+        if (isImage || isPDF) {
             setFile(selectedFile);
             setError(null);
 
@@ -110,7 +108,7 @@ export default function UploadForm() {
                 setPreviewUrl(null);
             }
         } else {
-            setError("Unsupported format. Please supply a .docx, .png, or .jpg file.");
+            setError("Unsupported format. Please supply a .pdf, .png, or .jpg file.");
             setFile(null);
             setPreviewUrl(null);
         }
@@ -219,10 +217,12 @@ export default function UploadForm() {
                     const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
 
                     const userEmail = auth.currentUser?.email || "esther.shih@microfusion.cloud";
-                    const airlineName = getAirlineFromEmail(userEmail);
+                    const airlineName = isUserAdmin(userEmail) && selectedAirline
+                        ? selectedAirline
+                        : getAirlineFromEmail(userEmail);
 
                     // 3. Create Firestore record
-                    const fileType = file.type.startsWith("image/") ? "image" : "document";
+                    const fileType = file.type.startsWith("image/") ? "image" : "pdf";
                     const docRef = await addDoc(collection(db, "airline-upload"), {
                         file_name: file.name,
                         file_content: downloadURL,
@@ -278,6 +278,7 @@ export default function UploadForm() {
                     setFile(null);
                     setPreviewUrl(null);
                     setProgress(0);
+                    setSelectedAirline("");
                 }
             );
         } catch (err) {
@@ -379,7 +380,7 @@ export default function UploadForm() {
                     >
                         <input
                             type="file"
-                            accept=".docx,.png,.jpg,.jpeg"
+                            accept=".pdf,.png,.jpg,.jpeg"
                             onChange={handleFileChange}
                             className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-not-allowed"
                             disabled={uploading}
@@ -394,7 +395,7 @@ export default function UploadForm() {
 
                             <div className="space-y-1">
                                 <p className="text-slate-900 font-bold">Click or drag to supply asset</p>
-                                <p className="text-slate-400 text-xs mt-1 uppercase tracking-widest font-semibold">Docs or Images (.png, .jpg)</p>
+                                <p className="text-slate-400 text-xs mt-1 uppercase tracking-widest font-semibold">PDF or Images (.pdf, .png, .jpg)</p>
                             </div>
                         </div>
                     </div>
@@ -545,6 +546,24 @@ export default function UploadForm() {
                             animate={{ opacity: 1, height: "auto" }}
                             className="space-y-3 border-t border-slate-100 pt-6 mt-6"
                         >
+                            {isUserAdmin(auth.currentUser?.email) && (
+                                <div className="space-y-1.5">
+                                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1">
+                                        Airline (on behalf of)
+                                    </label>
+                                    <select
+                                        value={selectedAirline}
+                                        onChange={(e) => setSelectedAirline(e.target.value)}
+                                        disabled={uploading}
+                                        className="w-full px-4 py-3 rounded-2xl border border-slate-200 focus:outline-none focus:ring-4 focus:ring-slate-900/5 focus:border-slate-900 transition-all text-sm bg-slate-50/50 text-slate-700"
+                                    >
+                                        <option value="">Select airline…</option>
+                                        {AIRLINE_OPTIONS.map((a) => (
+                                            <option key={a} value={a}>{a}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
                             <label className="text-xs font-bold text-slate-500 uppercase tracking-widest ml-1 flex items-center space-x-2">
                                 <Mail className="w-3.5 h-3.5" />
                                 <span>Notification Target</span>
@@ -605,7 +624,7 @@ export default function UploadForm() {
 
                 <button
                     onClick={handleUpload}
-                    disabled={!file || uploading || status === "success"}
+                    disabled={!file || uploading || status === "success" || (isUserAdmin(auth.currentUser?.email) && !selectedAirline)}
                     className={cn(
                         "w-full py-5 px-6 rounded-2xl font-bold transition-all duration-300 flex items-center justify-center space-x-3 text-lg",
                         !file || uploading || status === "success"
